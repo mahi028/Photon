@@ -53,4 +53,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 5000
 
 # Start the application using Gunicorn (Production WSGI server)
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "src.backend.wsgi:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "120", "src.backend.wsgi:app"]

@@ -339,7 +339,7 @@ def stream_events(window_id: str):
     def event_generator() -> Generator[str, None, None]:
         while True:
             try:
-                event = q.get(timeout=30)
+                event = q.get(timeout=15)
             except queue.Empty:
                 # Send a keepalive comment
                 yield ": keepalive\n\n"
