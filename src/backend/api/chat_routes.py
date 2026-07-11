@@ -17,7 +17,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Iterator
 
 from flask import Blueprint, Response, request, jsonify, stream_with_context
 
@@ -152,7 +152,7 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
         })
 
         exec_result = _executor.execute(
-            code=llm_result.code,
+            code=llm_result.code or "",
             input_path=input_path,
             output_dir=str(output_dir),
             timeout=config.EXECUTION_TIMEOUT_SECONDS,
@@ -336,7 +336,7 @@ def stream_events(window_id: str):
 
     q = _get_or_create_queue(window_id)
 
-    def event_generator() -> Generator[str, None, None]:
+    def event_generator() -> Iterator[str]:
         while True:
             try:
                 event = q.get(timeout=15)
@@ -353,7 +353,7 @@ def stream_events(window_id: str):
             yield f"data: {json.dumps(event)}\n\n"
 
     return Response(
-        stream_with_context(event_generator()),
+        stream_with_context(event_generator()),  # type: ignore
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
