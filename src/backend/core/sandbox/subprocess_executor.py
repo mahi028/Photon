@@ -277,11 +277,12 @@ class SubprocessExecutor(Executor):
                     resource.RLIMIT_CPU,
                     (timeout * 2, timeout * 3),
                 )
-                # Address space: 2 GB
+                # Address space limit
                 try:
+                    limit_bytes = config.SANDBOX_MEMORY_LIMIT_GB * 1024**3
                     resource.setrlimit(
                         resource.RLIMIT_AS,
-                        (2 * 1024**3, 2 * 1024**3),
+                        (limit_bytes, limit_bytes),
                     )
                 except (ValueError, resource.error):
                     pass
@@ -308,6 +309,18 @@ class SubprocessExecutor(Executor):
             )
             proc_stdout = result.stdout
             proc_stderr = result.stderr
+            if result.returncode != 0:
+                if result.returncode < 0:
+                    import signal
+                    sig_num = -result.returncode
+                    try:
+                        sig_name = signal.Signals(sig_num).name
+                    except ValueError:
+                        sig_name = f"Signal {sig_num}"
+                    proc_stderr += f"\n[Process killed by {sig_name}]"
+                else:
+                    if not proc_stderr.strip():
+                        proc_stderr += f"\n[Process exited with code {result.returncode}]"
         except subprocess.TimeoutExpired as e:
             timed_out = True
             proc_stdout = e.stdout.decode("utf-8", errors="replace") if e.stdout else ""
