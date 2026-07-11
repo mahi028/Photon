@@ -2,7 +2,6 @@
   <img src="src/frontend/static/assets/logo.png" alt="Photon Logo" height="80" />
 </div>
 
-<h1 align="center">Photon</h1>
 <p align="center"><strong>AI-Powered Image Processing</strong></p>
 
 Photon is an autonomous, natural-language image processing studio. Upload any image, describe how you want it transformed in plain English, and watch the AI write, execute, and self-correct the required Python code in real-time to deliver the result.
