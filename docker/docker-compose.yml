@@ -1,0 +1,16 @@
+services:
+  photon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: photon-app
+    ports:
+      - "5050:5000"
+    volumes:
+      # Mount the volumes directory to persist uploaded/generated images
+      - ../volumes:/app/volumes
+    env_file:
+      - ../.env
+    environment:
+      - FLASK_ENV=production
+    restart: unless-stopped

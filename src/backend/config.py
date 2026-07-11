@@ -75,8 +75,8 @@ class Config:
     )
 
     # Sandbox executor class
-    # TODO(spec): Currently SubprocessExecutor — change to DockerExecutor for production hardening
-    EXECUTOR_CLASS: str = "subprocess"  # "subprocess" | "docker"
+    # Use DockerExecutor in production for security, SubprocessExecutor in development for speed
+    EXECUTOR_CLASS: str = "docker" if ENV == "production" else "subprocess"
 
 
 config = Config()

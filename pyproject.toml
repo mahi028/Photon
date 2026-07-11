@@ -17,3 +17,10 @@ dependencies = [
     "scikit-image>=0.26.0",
     "tifffile>=2026.6.1",
 ]
+
+[tool.pyright]
+include = ["src"]
+extraPaths = ["."]
+executionEnvironments = [
+  { root = "." }
+]
