@@ -65,13 +65,13 @@ uv run src/backend/wsgi.py
 
 or for Production server
 
-````bash
+```bash
 uv run gunicorn -b 0.0.0.0:80 -w 4 src.backend.wsgi:app # on linux
 
 uv run waitress-serve --listen=0.0.0.0:80 src.backend.wsgi:app # on windows
 ```
 
-*Alternatively:* `flask --app src/backend/app run --debug`
+_Alternatively:_ `flask --app src/backend/app run --debug`
 
 Open `http://localhost:5000` in your browser.
 
@@ -83,7 +83,7 @@ Whether you are using manual mode or observing the AI, Photon relies on a strict
 def main(input_path: str, output_path_dir: str) -> str:
     """Read input_path, transform, save result into output_path_dir, return full saved path."""
     ...
-````
+```
 
 _(You can view example code from within the application interface.)_
 
