@@ -1,0 +1,18 @@
+<!-- Metadata Block Partial — read-only, copyable JSON code block -->
+<!-- Used both in upload_panel and inside each window pane -->
+<div class="relative group">
+  <div class="flex items-center justify-between mb-1">
+    <span class="text-xs text-gray-500 font-medium uppercase tracking-wide">Image Metadata</span>
+    <button
+      @click="copyMetadata()"
+      class="text-xs text-gray-500 hover:text-indigo-400 transition-colors duration-150 flex items-center gap-1"
+      title="Copy metadata JSON">
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+      </svg>
+      <span x-text="copied ? 'Copied!' : 'Copy'"></span>
+    </button>
+  </div>
+  <pre class="code-block custom-scrollbar text-xs max-h-48 overflow-y-auto" x-text="JSON.stringify(metadata, null, 2)"></pre>
+</div>

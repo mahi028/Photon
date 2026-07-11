@@ -1,0 +1,55 @@
+<!-- Share Link Dialog -->
+<div
+  x-data="shareDialog()"
+  x-show="$store.shareDialog.isOpen"
+  @keydown.escape.window="$store.shareDialog.close()"
+  class="fixed inset-0 z-50 flex items-center justify-center p-4"
+  style="display: none;"
+  x-transition>
+
+  <!-- Backdrop -->
+  <div class="absolute inset-0 bg-black/70" @click="$store.shareDialog.close()"></div>
+
+  <!-- Dialog -->
+  <div class="relative bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-md flex flex-col overflow-hidden">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800 shrink-0">
+      <h2 class="text-base font-semibold text-white">Share Link</h2>
+      <button @click="$store.shareDialog.close()" class="text-gray-500 hover:text-white transition-colors">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="p-6 space-y-4">
+      <template x-if="loading">
+        <div class="flex justify-center p-4">
+          <div class="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+      </template>
+      
+      <template x-if="!loading && error">
+        <div class="text-sm text-red-400 bg-red-400/10 p-3 rounded-lg border border-red-400/20" x-text="error"></div>
+      </template>
+
+      <template x-if="!loading && shareUrl">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-400">Anyone with this link can interact with this window. <span class="font-medium text-amber-500">Links are fully interactive.</span></p>
+          
+          <div class="flex gap-2">
+            <input type="text" readonly x-model="shareUrl" class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+            <button @click="copyLink()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2">
+              <span x-text="copied ? 'Copied!' : 'Copy'"></span>
+            </button>
+          </div>
+          
+          <div class="flex justify-end pt-2">
+            <button @click="unshare()" class="text-sm text-red-400 hover:text-red-300 transition-colors font-medium">
+              Revoke Link (Unshare)
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>

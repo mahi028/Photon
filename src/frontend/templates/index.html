@@ -1,0 +1,343 @@
+{% extends "base.html" %}
+
+{% block title %}Photon — LLM Image Processing{% endblock %}
+
+{% block content %}
+<div id="app" x-data="app()"
+  @view-full-image.window="openCarousel([{url: $event.detail, label: 'Image', code: null}], 0)"
+  @view-carousel.window="openCarousel($event.detail.slides, $event.detail.startIndex || 0)"
+  @keydown.arrow-left.window="carouselPrev()"
+  @keydown.arrow-right.window="carouselNext()"
+  @keydown.escape.window="closeCarousel()"
+  class="flex flex-col h-screen overflow-hidden">
+
+  <!-- Top Bar -->
+  <header class="flex items-center justify-between px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3">
+      <button @click="sidebarCollapsed = !sidebarCollapsed" class="text-gray-400 hover:text-white p-1 rounded transition-colors" title="Toggle Sidebar">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7"/></svg>
+      </button>
+      <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
+      <span class="text-xs text-gray-500 hidden sm:block">AI-Powered Image Processing</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <button
+        @click="showDownload = true"
+        class="btn-secondary text-sm flex items-center gap-2"
+        :disabled="allOutputs.length === 0"
+        title="Download outputs">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+        </svg>
+        Download
+        <span x-show="allOutputs.length > 0" class="bg-indigo-600 text-white text-xs px-1.5 py-0.5 rounded-full" x-text="allOutputs.length"></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Layout -->
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- Left Sidebar: Upload + Image Info -->
+    <aside 
+      class="shrink-0 flex flex-col border-r border-gray-800 bg-gray-950 overflow-y-auto custom-scrollbar relative transition-all duration-300"
+      :style="sidebarCollapsed ? 'width: 0px; border-right-width: 0px; opacity: 0;' : `width: ${sidebarWidth}px; opacity: 1;`"
+      :class="{'overflow-hidden': sidebarCollapsed}"
+    >
+      <div class="w-full h-full flex flex-col min-w-[240px]">
+        {% include "partials/upload_panel.html" %}
+      </div>
+      <!-- Drag handle -->
+      <div 
+        x-show="!sidebarCollapsed"
+        class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-indigo-500/50 transition-colors z-10"
+        @mousedown.prevent="startSidebarDrag($event)">
+      </div>
+    </aside>
+
+    <!-- Right: Tab bar + active window -->
+    <main class="flex-1 flex flex-col overflow-hidden">
+      {% include "partials/window_tab.html" %}
+    </main>
+
+  </div>
+
+  <!-- Download Dialog -->
+  {% include "partials/download_dialog.html" %}
+
+  <!-- Shared View Code Dialog -->
+  {% include "partials/code_dialog.html" %}
+
+  <!-- Share Link Dialog -->
+  {% include "partials/share_dialog.html" %}
+
+  <!-- Carousel Modal -->
+  <div x-show="carouselOpen" @click.self="closeCarousel()" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/92 p-4" x-transition style="display:none;">
+
+    <!-- Close -->
+    <button @click="closeCarousel()" class="absolute top-4 right-4 text-white/70 hover:text-white z-20 transition-colors" title="Close (Esc)">
+      <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+
+    <!-- Counter -->
+    <template x-if="carouselSlides.length > 1">
+      <div class="absolute top-4 left-1/2 -translate-x-1/2 text-xs text-white/60 select-none z-20 flex items-center gap-2">
+        <span x-text="carouselIndex + 1"></span><span>/</span><span x-text="carouselSlides.length"></span>
+        <span class="text-white/40">·</span>
+        <span x-text="carouselSlides[carouselIndex]?.label" class="text-white/80 font-medium"></span>
+      </div>
+    </template>
+
+    <!-- Image -->
+    <div class="relative flex items-center justify-center w-full h-full" style="max-width:90vw;max-height:90vh;">
+      <div x-show="carouselLoading" class="absolute inset-0 flex items-center justify-center z-10">
+        <span class="animate-spin w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full"></span>
+      </div>
+      <template x-if="carouselSlides.length > 0">
+        <img
+          :src="carouselSlides[carouselIndex]?.url"
+          @load="carouselLoading = false"
+          :class="{'opacity-0': carouselLoading}"
+          class="max-w-full max-h-full object-contain transition-opacity duration-150 select-none"
+          style="max-height:85vh;"
+          draggable="false"
+        />
+      </template>
+    </div>
+
+    <!-- Prev arrow -->
+    <template x-if="carouselIndex > 0">
+      <button @click.stop="carouselPrev()" class="absolute left-4 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors z-20">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+      </button>
+    </template>
+
+    <!-- Next arrow -->
+    <template x-if="carouselIndex < carouselSlides.length - 1">
+      <button @click.stop="carouselNext()" class="absolute right-4 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors z-20">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+      </button>
+    </template>
+
+    <!-- Dot indicators -->
+    <template x-if="carouselSlides.length > 1 && carouselSlides.length <= 10">
+      <div class="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-1.5 z-20">
+        <template x-for="(slide, i) in carouselSlides" :key="i">
+          <button @click.stop="goToCarouselSlide(i)" :class="i === carouselIndex ? 'bg-white w-4' : 'bg-white/30 hover:bg-white/60 w-2'" class="h-2 rounded-full transition-all duration-200"></button>
+        </template>
+      </div>
+    </template>
+
+    <!-- Code button if current slide has code -->
+    <template x-if="carouselSlides[carouselIndex]?.code">
+      <button
+        @click.stop="$store.codeDialog.open('Source Code', carouselSlides[carouselIndex].label, carouselSlides[carouselIndex].code, 'viewer')"
+        class="absolute bottom-4 right-6 px-3 py-1.5 bg-indigo-600/80 hover:bg-indigo-500 text-white text-xs rounded-full font-medium transition-colors z-20">
+        &lt;/&gt; View Code
+      </button>
+    </template>
+
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/windowManager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/uploader.js') }}"></script>
+<script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+<script src="{{ url_for('static', filename='js/codeEditor.js') }}"></script>
+<script src="{{ url_for('static', filename='js/imageViewer.js') }}"></script>
+<script src="{{ url_for('static', filename='js/downloadDialog.js') }}"></script>
+<script src="{{ url_for('static', filename='js/codeDialog.js') }}"></script>
+<script src="{{ url_for('static', filename='js/shareDialog.js') }}"></script>
+
+<script>
+// Root Alpine component
+function app() {
+  return {
+    showDownload: false,
+    showExample: false,
+    allOutputs: [],   // populated by windowManager.js via events
+    sidebarWidth: 288,
+    sidebarCollapsed: false,
+    // Legacy single-image full screen (keep for backward compat)
+    fullImageSrc: null,
+    fullImageLoading: false,
+
+    // Carousel modal state
+    carouselOpen: false,
+    carouselSlides: [],   // [{url, label, code}]
+    carouselIndex: 0,
+    carouselLoading: false,
+
+    openCarousel(slides, startIndex) {
+      if (!slides || slides.length === 0) return;
+      this.carouselSlides = slides;
+      this.carouselIndex = Math.max(0, Math.min(startIndex, slides.length - 1));
+      this.carouselLoading = true;
+      this.carouselOpen = true;
+    },
+    closeCarousel() {
+      this.carouselOpen = false;
+      this.carouselSlides = [];
+    },
+    carouselPrev() {
+      if (this.carouselOpen && this.carouselIndex > 0) {
+        this.carouselLoading = true;
+        this.carouselIndex--;
+      }
+    },
+    carouselNext() {
+      if (this.carouselOpen && this.carouselIndex < this.carouselSlides.length - 1) {
+        this.carouselLoading = true;
+        this.carouselIndex++;
+      }
+    },
+    goToCarouselSlide(i) {
+      if (this.carouselOpen) {
+        this.carouselLoading = true;
+        this.carouselIndex = i;
+      }
+    },
+
+    // Download Dialog State
+    selectedDownloads: [],
+    downloadingZip: false,
+
+    addOutput(output) {
+      this.allOutputs.push(output);
+    },
+
+    startSidebarDrag(e) {
+      const startX = e.clientX;
+      const startWidth = this.sidebarWidth;
+      
+      const onMouseMove = (e) => {
+        this.sidebarWidth = Math.max(240, Math.min(800, startWidth + (e.clientX - startX)));
+      };
+      
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        document.body.style.cursor = '';
+      };
+      
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = 'col-resize';
+    },
+
+    toggleAllDownloads() {
+      if (this.selectedDownloads.length === this.allOutputs.length) {
+        this.selectedDownloads = [];
+      } else {
+        this.selectedDownloads = this.allOutputs.map(o => o.image_id);
+      }
+    },
+
+    async downloadZip() {
+      if (this.selectedDownloads.length === 0 || this.downloadingZip) return;
+      this.downloadingZip = true;
+
+      try {
+        const res = await fetch('/api/download', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({image_ids: this.selectedDownloads}),
+        });
+
+        if (!res.ok) {
+          const data = await res.json();
+          alert(`Download failed: ${data.error || 'Unknown error'}`);
+          return;
+        }
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'feature_explorer_outputs.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        this.showDownload = false;
+        this.selectedDownloads = [];
+      } catch (e) {
+        alert(`Download error: ${e.message}`);
+      } finally {
+        this.downloadingZip = false;
+      }
+    },
+
+    async init() {
+      // Listen for new outputs from any window (real-time)
+      window.addEventListener('fe:new-output', (e) => {
+        // Avoid duplicates if output was already hydrated from server
+        if (!this.allOutputs.find(o => o.image_id === e.detail.image_id)) {
+          this.allOutputs.push(e.detail);
+        }
+      });
+
+      // Hydrate allOutputs from the server on load so Download works after refresh
+      try {
+        const winRes = await fetch('/api/windows');
+        if (winRes.ok) {
+          const windows = await winRes.json();
+          for (const win of windows) {
+            const outRes = await fetch(`/api/windows/${win.window_id}/outputs`);
+            if (outRes.ok) {
+              const outputs = await outRes.json();
+              for (const out of outputs) {
+                if (!this.allOutputs.find(o => o.image_id === out.image_id)) {
+                  this.allOutputs.push(out);
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Failed to hydrate outputs:', e);
+      }
+    }
+  };
+}
+
+// Global Alpine Stores
+document.addEventListener('alpine:init', () => {
+  Alpine.store('codeDialog', {
+    isOpen: false,
+    title: '',
+    subtitle: '',
+    code: '',
+    mode: 'viewer', // 'viewer' | 'example'
+    open(title, subtitle, code, mode = 'viewer') {
+      this.title = title;
+      this.subtitle = subtitle;
+      this.code = code;
+      this.mode = mode;
+      this.isOpen = true;
+    },
+    close() {
+      this.isOpen = false;
+    }
+  });
+
+  Alpine.store('shareDialog', {
+    isOpen: false,
+    windowId: null,
+    open(windowId) {
+      this.windowId = windowId;
+      this.isOpen = true;
+      // Tell component to fetch token
+      window.dispatchEvent(new CustomEvent('fe:share-opened', { detail: windowId }));
+    },
+    close() {
+      this.isOpen = false;
+    }
+  });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100 font-sans;
+  }
+}
+
+@layer components {
+  .code-block {
+    @apply font-mono text-sm bg-gray-900 text-green-300 rounded-lg p-4 overflow-x-auto;
+  }
+  .btn-primary {
+    @apply bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-2 rounded-lg transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply bg-gray-700 hover:bg-gray-600 text-gray-100 font-semibold px-4 py-2 rounded-lg transition-colors duration-150;
+  }
+  .btn-danger {
+    @apply bg-red-700 hover:bg-red-600 text-white font-semibold px-3 py-1 rounded-lg transition-colors duration-150;
+  }
+  .panel {
+    @apply bg-gray-900 rounded-xl border border-gray-800 p-4;
+  }
+  .tab-btn {
+    @apply flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors duration-150 cursor-pointer;
+  }
+  .tab-btn-active {
+    @apply bg-indigo-700 text-white;
+  }
+  .tab-btn-inactive {
+    @apply bg-gray-800 text-gray-300 hover:bg-gray-700;
+  }
+  .badge-llm {
+    @apply text-xs bg-indigo-900 text-indigo-300 px-1.5 py-0.5 rounded;
+  }
+  .badge-manual {
+    @apply text-xs bg-emerald-900 text-emerald-300 px-1.5 py-0.5 rounded;
+  }
+  
+  /* Custom Scrollbar Styles */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-gray-700 rounded-full;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-500;
+  }
+}

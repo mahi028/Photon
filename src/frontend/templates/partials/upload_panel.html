@@ -1,0 +1,86 @@
+<!-- Upload Panel Partial -->
+<div x-data="uploader()" class="flex flex-col gap-4 p-4">
+
+  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide">Image</h2>
+
+  <!-- Drop Zone -->
+  <div
+    id="drop-zone"
+    @dragover.prevent="dragging = true"
+    @dragleave="dragging = false"
+    @drop.prevent="handleDrop($event)"
+    :class="dragging ? 'border-indigo-400 bg-indigo-900/20' : 'border-gray-700 hover:border-gray-500'"
+    class="border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors duration-150"
+    @click="$refs.fileInput.click()">
+    <input type="file" x-ref="fileInput" class="hidden" @change="handleFileSelect($event)"
+           accept=".png,.jpg,.jpeg,.tif,.tiff,.npy,.bmp,.webp" multiple />
+    <div x-show="!uploading && images.length === 0">
+      <svg class="w-10 h-10 mx-auto text-gray-600 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+      </svg>
+      <p class="text-sm text-gray-400">Drag & drop or click to upload</p>
+      <p class="text-xs text-gray-600 mt-1">PNG, JPG, TIFF, NPY, BMP, WebP · max 200 MB</p>
+    </div>
+    <div x-show="uploading" class="text-indigo-400 text-sm">Uploading...</div>
+    <div x-show="images.length > 0 && !uploading" class="text-emerald-400 text-sm" x-text="`${images.length} Image${images.length > 1 ? 's' : ''} loaded`"></div>
+  </div>
+
+  <!-- URL Input -->
+  <div class="flex gap-2">
+    <input
+      type="url"
+      x-model="urlInput"
+      placeholder="Or paste image URL..."
+      class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+      @keydown.enter="uploadFromUrl()" />
+    <button @click="uploadFromUrl()" class="btn-secondary text-sm px-3">Go</button>
+  </div>
+
+  <!-- Progress Bar -->
+  <div x-show="uploading" class="w-full bg-gray-800 rounded-full h-1.5">
+    <div class="bg-indigo-500 h-1.5 rounded-full transition-all duration-300" :style="`width: ${progress}%`"></div>
+  </div>
+
+  <!-- Error -->
+  <p x-show="error" x-text="error" class="text-red-400 text-xs"></p>
+
+
+  <!-- Image List -->
+  <template x-if="images.length > 0">
+    <div class="flex flex-col gap-2 max-h-48 overflow-y-auto custom-scrollbar pr-2">
+      <template x-for="(img, index) in images" :key="img.image_id">
+        <div class="flex items-center gap-3 bg-gray-900/50 border border-gray-800 rounded-lg p-2 relative group">
+          <img :src="img.preview_url" :alt="img.metadata.original_filename" class="w-10 h-10 object-cover rounded bg-black" />
+          <div class="flex-1 min-w-0">
+            <p class="text-xs text-gray-200 truncate" x-text="img.metadata.original_filename"></p>
+            <p class="text-[10px] text-gray-500" x-text="img.metadata.shape ? `Shape: ${img.metadata.shape.join('x')} | Dtype: ${img.metadata.dtype}` : ''"></p>
+          </div>
+          <button @click="removeImage(index)" class="opacity-0 group-hover:opacity-100 p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-all absolute right-2" title="Remove image">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- Open Window Buttons -->
+  <template x-if="images.length > 0">
+    <div class="flex flex-col gap-2 pt-2 border-t border-gray-800">
+      <p class="text-xs text-gray-500 font-medium" x-text="`Open window with ${images.length} image${images.length > 1 ? 's' : ''}:`"></p>
+      <button @click="openWindow('llm')" class="btn-primary text-sm flex items-center gap-2 justify-center">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+        </svg>
+        <span x-text="images.length > 1 ? 'Batch Chat with LLM' : 'Chat with LLM'"></span>
+      </button>
+      <button @click="openWindow('manual')" class="btn-secondary text-sm flex items-center gap-2 justify-center">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
+        </svg>
+        <span x-text="images.length > 1 ? 'Batch Write Code' : 'Write My Own Code'"></span>
+      </button>
+    </div>
+  </template>
+
+</div>

@@ -1,0 +1,12 @@
+{
+  "name": "photon",
+  "version": "1.0.0",
+  "description": "Tailwind build for Photon — AI-Powered Image Processing",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/frontend/static/css/input.css -o ./src/frontend/static/css/output.css",
+    "watch:css": "tailwindcss -i ./src/frontend/static/css/input.css -o ./src/frontend/static/css/output.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.0"
+  }
+}

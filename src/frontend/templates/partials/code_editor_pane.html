@@ -1,0 +1,104 @@
+<!-- Code Editor Pane — manual mode -->
+<div class="flex h-full overflow-hidden w-full">
+
+  <!-- Left/Middle: Images -->
+  <div class="flex-1 min-w-0 flex flex-col p-6 bg-gray-950 border-r border-gray-800 overflow-y-auto custom-scrollbar">
+    {% include "partials/image_compare.html" %}
+  </div>
+
+  <!-- Right: Code Editor Panel -->
+  <div class="w-[350px] max-w-[350px] min-w-[350px] shrink-0 flex flex-col h-full bg-gray-900 p-4 gap-3">
+
+    <!-- Toolbar -->
+    <div class="flex items-center justify-between shrink-0">
+      <div class="flex items-center gap-2">
+        <span class="badge-manual">&lt;/&gt;</span>
+        <span class="text-sm font-medium text-gray-300">Code Editor</span>
+        <span class="text-xs text-gray-500" x-text="window.images.length > 1 ? `Batch: ${window.images.length} images` : (window.image_id ? 'Image: ' + window.image_id.slice(0, 8) + '...' : '')"></span>
+      </div>
+      <div class="flex items-center gap-3">
+        <button @click="$store.shareDialog.open(window.window_id)" class="text-xs text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-1" title="Share window">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/>
+          </svg>
+          Share
+        </button>
+        <button @click="showMeta = !showMeta" class="text-xs text-gray-500 hover:text-gray-300 transition-colors">
+          <span x-text="showMeta ? 'Hide' : 'Show'"></span> Metadata
+        </button>
+        <button @click="$store.codeDialog.open('Example Code', 'A simple starting point', 'def main(input_path: str, output_path_dir: str) -> str:\n    import os, cv2\n    # Example implementation\n    return os.path.join(output_path_dir, \'out.jpg\')', 'example')" class="btn-secondary text-xs px-2 py-1">
+          Example
+        </button>
+      </div>
+    </div>
+
+    <!-- Collapsible Metadata -->
+    <div x-show="showMeta" x-transition class="shrink-0">
+      <div x-data="{ metadata: window.metadata, copied: false, copyMetadata() { navigator.clipboard.writeText(JSON.stringify(this.metadata, null, 2)); this.copied = true; setTimeout(() => this.copied = false, 2000); } }">
+        {% include "partials/metadata_block.html" %}
+      </div>
+    </div>
+
+    <!-- Editor + Run -->
+    <div class="flex-1 flex flex-col gap-2 min-h-0">
+      <div class="flex items-center justify-between shrink-0">
+        <span class="text-xs text-gray-500 truncate">Python · <code class="text-green-400">main(...) → str</code></span>
+        <button
+          @click="runCode()"
+          :disabled="running"
+          class="btn-primary text-sm px-4 py-1.5 flex items-center gap-2">
+          <template x-if="!running">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </template>
+          <template x-if="running">
+            <span class="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></span>
+          </template>
+          <span x-text="running ? 'Running...' : 'Run'"></span>
+        </button>
+      </div>
+
+      <!-- CodeMirror editor target -->
+      <div id="editor-container" x-ref="editorContainer"
+        class="border border-gray-700 rounded-xl overflow-hidden bg-gray-900 flex-1 min-h-0"
+        style="font-size:13px;">
+        <!-- CodeMirror renders here -->
+      </div>
+    </div>
+
+    <!-- Execution Log -->
+    <template x-if="execResult">
+      <div class="shrink-0 panel">
+        <div class="flex items-center gap-2 mb-2">
+          <span :class="execResult.all_success || execResult.file_exists ? 'text-emerald-400' : 'text-red-400'" class="text-sm font-medium">
+            <span x-text="execResult.all_success || execResult.file_exists ? '✓ Success' : '✗ Failed'"></span>
+          </span>
+          <span class="text-xs text-gray-500" x-text="`${execResult.time_taken_seconds?.toFixed(2)}s`"></span>
+          <span x-show="execResult.timed_out" class="text-xs text-orange-400 font-medium">TIMED OUT</span>
+        </div>
+        <template x-if="execResult.stderr && execResult.stderr.trim()">
+          <div>
+            <p class="text-xs text-gray-500 mb-1">stderr:</p>
+            <pre class="code-block custom-scrollbar text-xs max-h-32 overflow-y-auto text-red-300" x-text="execResult.stderr"></pre>
+          </div>
+        </template>
+        <template x-if="execResult.traceback">
+          <div class="mt-2">
+            <p class="text-xs text-gray-500 mb-1">traceback:</p>
+            <pre class="code-block custom-scrollbar text-xs max-h-32 overflow-y-auto text-orange-300" x-text="execResult.traceback"></pre>
+          </div>
+        </template>
+        <template x-if="execResult.stdout && execResult.stdout.trim()">
+          <div class="mt-2">
+            <p class="text-xs text-gray-500 mb-1">stdout:</p>
+            <pre class="code-block custom-scrollbar text-xs max-h-20 overflow-y-auto" x-text="execResult.stdout"></pre>
+          </div>
+        </template>
+      </div>
+    </template>
+
+  </div>
+
+</div>

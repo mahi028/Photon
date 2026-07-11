@@ -1,0 +1,68 @@
+<!-- Reusable Code Viewer Dialog -->
+<div
+  x-data="codeDialogViewer()"
+  x-show="$store.codeDialog.isOpen"
+  @keydown.escape.window="$store.codeDialog.close()"
+  class="fixed inset-0 z-50 flex items-center justify-center p-4"
+  style="display: none;"
+  x-transition>
+
+  <!-- Backdrop -->
+  <div class="absolute inset-0 bg-black/70" @click="$store.codeDialog.close()"></div>
+
+  <!-- Dialog -->
+  <div class="relative bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
+
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800 shrink-0">
+      <div>
+        <h2 class="text-base font-semibold text-white" x-text="$store.codeDialog.title">View Code</h2>
+        <template x-if="$store.codeDialog.subtitle">
+          <p class="text-xs text-gray-500 mt-0.5" x-text="$store.codeDialog.subtitle"></p>
+        </template>
+      </div>
+      <button @click="$store.codeDialog.close()" class="text-gray-500 hover:text-white transition-colors">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="overflow-y-auto flex-1 p-0">
+      <!-- We can optionally show the contract on top if it's the 'example' code -->
+      <template x-if="$store.codeDialog.mode === 'example'">
+        <div class="px-6 py-4 border-b border-gray-800 bg-gray-900/50">
+          <div class="prose prose-invert prose-sm max-w-none">
+            <h3 class="text-sm font-semibold text-gray-300 mb-2">Function Contract</h3>
+            <pre class="code-block text-xs bg-black">def main(input_path: str, output_path_dir: str) -> str:
+    # input_path     — path to the uploaded image (read-only)
+    # output_path_dir — directory to save your output
+    # return          — full path to the saved output file
+    ...</pre>
+            <ul class="text-xs text-gray-400 mt-3 space-y-1 list-disc pl-4">
+              <li>Use <code class="text-green-400">.png</code> / <code class="text-green-400">.jpg</code> for ≤4 channels</li>
+              <li>Use <code class="text-green-400">.npy</code> / <code class="text-green-400">.tiff</code> for &gt;4 channels</li>
+              <li>Normalize to uint8 [0, 255] before saving as PNG/JPEG</li>
+              <li>Allowed libs: numpy, PIL, cv2, scipy, skimage, tifffile</li>
+            </ul>
+          </div>
+        </div>
+      </template>
+
+      <div class="relative w-full h-full min-h-[300px]">
+        <div class="absolute top-2 right-4 z-10">
+          <button
+            @click="copyCode()"
+            class="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs font-medium text-gray-300 hover:text-white hover:border-gray-500 transition-colors flex items-center gap-1.5 shadow-sm">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+            </svg>
+            <span x-text="copied ? 'Copied!' : 'Copy'"></span>
+          </button>
+        </div>
+        
+        <!-- A simple readonly pre/code block instead of full CodeMirror for the dialog to keep it lightweight -->
+        <pre class="w-full h-full m-0 p-6 bg-[#0d1117] text-gray-300 text-sm overflow-auto font-mono" x-text="$store.codeDialog.code"></pre>
+      </div>
+    </div>
+  </div>
+</div>

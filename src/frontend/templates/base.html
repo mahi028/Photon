@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Photon{% endblock %}</title>
+  <meta name="description" content="{% block description %}LLM-driven image feature and transformation visualizer. Upload any image, describe a transformation, and watch Claude write and run the code.{% endblock %}" />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind output CSS -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/output.css') }}" />
+
+  <!-- Alpine.js (no build step) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='assets/favicon.png') }}" />
+
+  {% block head %}{% endblock %}
+</head>
+<body class="min-h-screen bg-gray-950 text-gray-100 font-sans">
+  {% block content %}{% endblock %}
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

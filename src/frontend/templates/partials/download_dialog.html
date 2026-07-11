@@ -1,0 +1,71 @@
+<!-- Download Dialog -->
+<div
+  x-show="showDownload"
+  @keydown.escape.window="showDownload = false"
+  class="fixed inset-0 z-50 flex items-center justify-center p-4"
+  x-transition
+  style="display: none;">
+
+  <!-- Backdrop -->
+  <div class="absolute inset-0 bg-black/70" @click="showDownload = false"></div>
+
+  <!-- Dialog -->
+  <div class="relative bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-lg max-h-[70vh] flex flex-col overflow-hidden">
+
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800 shrink-0">
+      <div>
+        <h2 class="text-base font-semibold text-white">Download Outputs</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Select images to export as a zip</p>
+      </div>
+      <button @click="showDownload = false" class="text-gray-500 hover:text-white transition-colors">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Output list -->
+    <div class="overflow-y-auto flex-1 px-4 py-3 space-y-2">
+      <template x-if="allOutputs.length === 0">
+        <p class="text-gray-500 text-sm text-center py-8">No outputs yet</p>
+      </template>
+      <template x-for="output in allOutputs" :key="output.image_id">
+        <label class="flex items-center gap-3 cursor-pointer group hover:bg-gray-800 rounded-xl p-2 transition-colors">
+          <input type="checkbox" :value="output.image_id" x-model="selectedDownloads"
+            class="w-4 h-4 accent-indigo-500 cursor-pointer" />
+          <img :src="output.preview_url" :alt="output.description"
+            class="w-14 h-10 object-cover rounded-lg bg-gray-800 shrink-0" />
+          <div class="flex-1 min-w-0">
+            <p class="text-sm text-gray-200 truncate" x-text="output.description"></p>
+            <p class="text-xs text-gray-500" x-text="output.produced_at ? new Date(output.produced_at).toLocaleTimeString() : ''"></p>
+          </div>
+        </label>
+      </template>
+    </div>
+
+    <!-- Footer -->
+    <div class="flex items-center justify-between px-6 py-4 border-t border-gray-800 shrink-0">
+      <div class="flex items-center gap-3">
+        <button @click="toggleAllDownloads()" class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+          x-text="selectedDownloads.length === allOutputs.length ? 'Deselect all' : 'Select all'"></button>
+        <span class="text-xs text-gray-600" x-text="`${selectedDownloads.length} selected`"></span>
+      </div>
+      <button
+        @click="downloadZip()"
+        :disabled="selectedDownloads.length === 0 || downloadingZip"
+        class="btn-primary text-sm flex items-center gap-2">
+        <template x-if="!downloadingZip">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+        </template>
+        <template x-if="downloadingZip">
+          <span class="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></span>
+        </template>
+        <span x-text="downloadingZip ? 'Preparing...' : 'Download Zip'"></span>
+      </button>
+    </div>
+
+  </div>
+</div>

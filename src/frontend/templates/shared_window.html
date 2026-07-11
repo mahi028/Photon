@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+
+{% block title %}Photon — Shared Window{% endblock %}
+
+{% block content %}
+<div id="app" x-data="sharedApp()" @view-full-image.window="fullImageSrc = $event.detail; fullImageLoading = true" class="flex flex-col h-screen overflow-hidden">
+
+  <!-- Top Bar -->
+  <header class="flex items-center justify-between px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3">
+      <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
+      <span class="text-xs text-gray-400 border border-gray-700 px-2 py-0.5 rounded-full hidden sm:block">Shared Window</span>
+    </div>
+    <div class="flex items-center gap-3 text-sm text-gray-500">
+      <a href="/" class="hover:text-indigo-400 transition-colors">Start your own session</a>
+    </div>
+  </header>
+
+  <!-- Main Layout -->
+  <div class="flex flex-1 overflow-hidden" x-data="windowManager()">
+    
+    <!-- Active Window Content -->
+    <div class="flex-1 overflow-hidden relative">
+      <template x-for="win in windows" :key="win.window_id">
+        <div class="absolute inset-0 bg-gray-950 flex flex-col" x-show="activeWindowId === win.window_id">
+          <template x-if="win.mode === 'llm'">
+            <div class="flex-1 min-h-0" x-data="chatPane(win)">
+              {% include "partials/chat_pane.html" %}
+            </div>
+          </template>
+          <template x-if="win.mode === 'manual'">
+            <div class="flex-1 min-h-0" x-data="codeEditor(win)">
+              {% include "partials/code_editor_pane.html" %}
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Loading State -->
+      <template x-if="loading">
+        <div class="absolute inset-0 flex items-center justify-center bg-gray-950">
+          <span class="animate-spin w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full"></span>
+        </div>
+      </template>
+      
+      <!-- Error State -->
+      <template x-if="!loading && error">
+        <div class="absolute inset-0 flex flex-col items-center justify-center bg-gray-950 text-red-400 gap-4">
+          <svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          <span x-text="error"></span>
+        </div>
+      </template>
+    </div>
+
+  </div>
+
+  <!-- Shared View Code Dialog -->
+  {% include "partials/code_dialog.html" %}
+
+  <!-- Full Image Modal -->
+  <div x-show="fullImageSrc" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4" x-transition style="display: none;">
+    <button @click="fullImageSrc = null" class="absolute top-4 right-4 text-white hover:text-gray-300 z-10">
+      <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+    <div x-show="fullImageLoading" class="absolute inset-0 flex items-center justify-center">
+      <span class="animate-spin w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full"></span>
+    </div>
+    <img :src="fullImageSrc" @load="fullImageLoading = false" class="max-w-full max-h-full object-contain relative z-0" />
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.SHARED_WINDOW_ID = "{{ window_id }}";
+</script>
+<script src="{{ url_for('static', filename='js/windowManager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+<script src="{{ url_for('static', filename='js/codeEditor.js') }}"></script>
+<script src="{{ url_for('static', filename='js/imageViewer.js') }}"></script>
+<script src="{{ url_for('static', filename='js/codeDialog.js') }}"></script>
+
+<script>
+// Root component for shared view
+function sharedApp() {
+  return {
+    fullImageSrc: null,
+    fullImageLoading: false,
+    allOutputs: []
+  };
+}
+
+// Global Alpine Stores
+document.addEventListener('alpine:init', () => {
+  Alpine.store('codeDialog', {
+    isOpen: false,
+    title: '',
+    subtitle: '',
+    code: '',
+    mode: 'viewer',
+    open(title, subtitle, code, mode = 'viewer') {
+      this.title = title;
+      this.subtitle = subtitle;
+      this.code = code;
+      this.mode = mode;
+      this.isOpen = true;
+    },
+    close() {
+      this.isOpen = false;
+    }
+  });
+});
+</script>
+{% endblock %}

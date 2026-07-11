@@ -1,0 +1,93 @@
+<!-- Image Compare Partial — side-by-side + filmstrip -->
+<!-- Included in chat_pane.html and code_editor_pane.html -->
+<div class="flex-1 overflow-y-auto custom-scrollbar flex flex-col gap-8 pb-8 pr-2">
+  <template x-for="(img, slotIdx) in window.images" :key="img.image_id">
+    <div x-data="imageViewerSlot(slotIdx)" class="flex flex-col gap-2">
+
+      <!-- Side-by-side compare -->
+      <div class="flex gap-3 h-64 shrink-0">
+        <!-- Original -->
+        <div class="flex-1 flex flex-col gap-1 min-h-0">
+          <div class="flex justify-between items-center shrink-0">
+            <span class="text-xs text-gray-500 uppercase tracking-wide">
+              Original <span x-show="window.images.length > 1" x-text="`#${slotIdx+1}`"></span>
+            </span>
+            <span class="text-xs text-gray-600 truncate max-w-[150px]" x-text="img.metadata.original_filename" :title="img.metadata.original_filename"></span>
+          </div>
+          <div class="flex-1 bg-gray-900 rounded-xl border border-gray-800 overflow-hidden flex items-center justify-center relative group">
+            <template x-if="originalUrl">
+              <img
+                :src="originalUrl"
+                alt="Original"
+                class="max-w-full max-h-full object-contain cursor-pointer"
+                @click="openCarousel(0)"
+                title="Click to open carousel"
+              />
+            </template>
+            <template x-if="!originalUrl">
+              <span class="text-gray-700 text-sm">No image</span>
+            </template>
+            <!-- Expand hint -->
+            <template x-if="originalUrl">
+              <div class="absolute bottom-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div class="bg-black/60 text-gray-400 text-[9px] px-1.5 py-0.5 rounded">⤢ click</div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Output -->
+        <div class="flex-1 flex flex-col gap-1 min-h-0">
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="text-xs text-gray-500 uppercase tracking-wide">Output</span>
+            <span x-show="activeOutput && isComposite" class="text-xs text-yellow-500">Preview composite</span>
+          </div>
+          <div class="flex-1 bg-gray-900 rounded-xl border border-gray-800 overflow-hidden flex items-center justify-center relative group">
+            <template x-if="activeOutput">
+              <img
+                :src="activeOutput.preview_url"
+                :alt="activeOutput.description"
+                class="max-w-full max-h-full object-contain cursor-pointer"
+                @click="openCarousel(carouselIndexOf(activeOutput))"
+                title="Click to open carousel"
+              />
+            </template>
+            <template x-if="!activeOutput">
+              <span class="text-gray-700 text-sm">Output appears here</span>
+            </template>
+            <!-- Expand hint -->
+            <template x-if="activeOutput">
+              <div class="absolute bottom-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div class="bg-black/60 text-gray-400 text-[9px] px-1.5 py-0.5 rounded">⤢ click</div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Filmstrip -->
+      <div x-show="slotOutputs.length > 0" class="shrink-0">
+        <div class="flex gap-2 overflow-x-auto custom-scrollbar pb-1">
+          <template x-for="(out, i) in slotOutputs" :key="out.image_id">
+            <div
+              @click="setActiveOutput(out)"
+              :class="activeOutput && activeOutput.image_id === out.image_id ? 'ring-2 ring-indigo-500' : 'ring-1 ring-gray-700 hover:ring-gray-500'"
+              class="shrink-0 w-16 h-12 rounded-lg overflow-hidden cursor-pointer transition-all duration-150 relative bg-gray-900 group/thumb">
+              <img :src="out.preview_url" :alt="out.description" class="w-full h-full object-cover" />
+              <div class="absolute bottom-0 left-0 right-0 bg-black/60 text-[10px] text-gray-300 px-1 py-0.5 truncate text-center" x-text="`v${i+1}`"></div>
+              <!-- Code hover button -->
+              <template x-if="out.code">
+                <button
+                  @click.stop="$store.codeDialog.open('Source Code', `v${i+1}`, out.code, 'viewer')"
+                  class="absolute inset-0 bg-black/80 text-[10px] text-indigo-400 font-medium opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
+                  &lt;/&gt; Code
+                </button>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
+
+    </div>
+  </template>
+</div>
