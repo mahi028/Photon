@@ -101,6 +101,8 @@ def _parse_llm_response(raw_text: str) -> LLMTurnResult:
 
     try:
         data = json.loads(raw_text)
+        if data.get("response_type") == "code" and "code" in data:
+            data["code"] = _strip_markdown_fences(data["code"])
         return LLMTurnResult(**data)
     except json.JSONDecodeError:
         # Try repairing literal control characters (common with OpenAI models
@@ -108,6 +110,8 @@ def _parse_llm_response(raw_text: str) -> LLMTurnResult:
         try:
             repaired = _repair_json(raw_text)
             data = json.loads(repaired)
+            if data.get("response_type") == "code" and "code" in data:
+                data["code"] = _strip_markdown_fences(data["code"])
             return LLMTurnResult(**data)
         except (json.JSONDecodeError, Exception) as e2:
             logger.warning("LLM returned non-JSON (repair failed): %s", raw_text[:300])
