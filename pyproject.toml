@@ -16,6 +16,7 @@ dependencies = [
     "requests>=2.34.2",
     "scikit-image>=0.26.0",
     "tifffile>=2026.6.1",
+    "waitress>=3.0.2",
 ]
 
 [tool.pyright]

@@ -21,40 +21,56 @@ Photon is an autonomous, natural-language image processing studio. Upload any im
 ### Option A: Docker (Recommended)
 
 1. **Configure Environment**
+
    ```bash
    cp .env.example .env
    ```
+
    Edit `.env` to select your preferred LLM provider (`gemini` or `openai`) and insert your API key.
 
 2. **Run with Docker Compose**
    ```bash
    docker-compose -f docker/docker-compose.yml up --build -d
    ```
-   *Photon is now running! Open `http://localhost:5050` in your browser.*
+   _Photon is now running! Open `http://localhost:5050` in your browser._
 
 ### Option B: Local Setup
 
 **1. Install Dependencies**
+
 ```bash
 uv sync
 npm install
 ```
 
 **2. Configure Environment**
+
 ```bash
 cp .env.example .env
 ```
+
 Edit `.env` to select your preferred LLM provider (`gemini` or `openai`) and insert your API key. (Supports Google Gemini SDK, official OpenAI, or any OpenAI-compatible endpoint like Ollama or Groq).
 
 **3. Build UI Assets**
+
 ```bash
 npm run build:css
 ```
 
 **4. Launch Photon**
+
 ```bash
 uv run src/backend/wsgi.py
 ```
+
+or for Production server
+
+````bash
+uv run gunicorn -b 0.0.0.0:80 -w 4 src.backend.wsgi:app # on linux
+
+uv run waitress-serve --listen=0.0.0.0:80 src.backend.wsgi:app # on windows
+```
+
 *Alternatively:* `flask --app src/backend/app run --debug`
 
 Open `http://localhost:5000` in your browser.
@@ -67,8 +83,9 @@ Whether you are using manual mode or observing the AI, Photon relies on a strict
 def main(input_path: str, output_path_dir: str) -> str:
     """Read input_path, transform, save result into output_path_dir, return full saved path."""
     ...
-```
-*(You can view example code from within the application interface.)*
+````
+
+_(You can view example code from within the application interface.)_
 
 ## License
 
