@@ -41,6 +41,14 @@ class Config:
     # ---- LLM loop budget ----
     MAX_LOOP_ITERATIONS: int = 6
     EXECUTION_TIMEOUT_SECONDS: int = int(os.getenv("EXECUTION_TIMEOUT_SECONDS", "30"))
+
+    # ---- Sandbox threading ----
+    # Threads allowed for BLAS/OpenMP pools (OpenBLAS, MKL, numexpr, ...) inside
+    # sandboxed code. Applied via *_NUM_THREADS env vars in the child process.
+    # Keep at 1 on many-core machines: unrestricted OpenBLAS spawns a thread per
+    # core, blowing through RLIMIT_CPU (counted across threads) and memory.
+    # The sandbox CPU rlimit is scaled by this value so semantics stay sane.
+    SANDBOX_BLAS_THREADS: int = int(os.getenv("SANDBOX_BLAS_THREADS", "1"))
     SANDBOX_MEMORY_LIMIT_GB: int = int(os.getenv("SANDBOX_MEMORY_LIMIT_GB", "8"))
 
     # ---- Session & Persistence ----

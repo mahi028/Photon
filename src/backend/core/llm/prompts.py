@@ -58,8 +58,12 @@ def build_system_prompt(metadata: ImageMetadata) -> str:
         ```
         
         ## Available Libraries
-        
+
         {_LIBRARY_WHITELIST}
+
+        The sandbox already caps BLAS/OpenMP threading (OMP_NUM_THREADS etc. are
+        preset). Do NOT set threading environment variables in your code, and do
+        not avoid numpy/OpenBLAS for threading reasons — plain numpy is safe.
         
         ## Function Contract (REQUIRED for code responses)
         

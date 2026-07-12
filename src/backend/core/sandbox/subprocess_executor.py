@@ -257,6 +257,11 @@ class SubprocessExecutor(Executor):
         script_path.write_text(harness, encoding="utf-8")
 
         # Step 3: Build restricted environment
+        # BLAS/OpenMP pools capped via env vars (must be set before the child's
+        # numpy import): unrestricted OpenBLAS spawns a thread per core, which on
+        # many-core hosts exhausts RLIMIT_CPU (counted across threads) and blows
+        # per-thread buffer/stack memory. Configurable: SANDBOX_BLAS_THREADS.
+        blas_threads = str(max(1, config.SANDBOX_BLAS_THREADS))
         child_env = {
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": "",
@@ -264,6 +269,11 @@ class SubprocessExecutor(Executor):
             "TMPDIR": str(scratch_dir),
             "TEMP": str(scratch_dir),
             "TMP": str(scratch_dir),
+            "OMP_NUM_THREADS": blas_threads,
+            "OPENBLAS_NUM_THREADS": blas_threads,
+            "MKL_NUM_THREADS": blas_threads,
+            "VECLIB_MAXIMUM_THREADS": blas_threads,
+            "NUMEXPR_NUM_THREADS": blas_threads,
         }
 
         # Step 4: Resource limits (POSIX only)
@@ -272,10 +282,12 @@ class SubprocessExecutor(Executor):
             import resource
 
             def _set_limits():
-                # CPU time: 2× timeout (soft) / 3× (hard)
+                # CPU time: 2× timeout (soft) / 3× (hard), scaled by allowed
+                # BLAS threads — RLIMIT_CPU counts CPU summed across threads.
+                n_threads = max(1, config.SANDBOX_BLAS_THREADS)
                 resource.setrlimit(
                     resource.RLIMIT_CPU,
-                    (timeout * 2, timeout * 3),
+                    (timeout * 2 * n_threads, timeout * 3 * n_threads),
                 )
                 # Address space limit
                 try:
