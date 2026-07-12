@@ -1,14 +1,18 @@
 """SQLite-backed durable store for sessions (Windows, Messages, Outputs)."""
 
 import sqlite3
+from contextlib import closing
 import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 from ...models.dto import Window, Message, GeneratedImage, ExecutionResult, ImageMetadata
+from ...config import config
 
-DB_PATH = Path("volumes/sessions.db")
+# Absolute path — a relative path here silently creates a fresh, empty DB
+# whenever the app is launched from a different working directory.
+DB_PATH = config.VOLUMES_DIR / "sessions.db"
 
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -18,7 +22,7 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 def init_db():
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS windows (
                 window_id TEXT PRIMARY KEY,
@@ -80,13 +84,30 @@ def init_db():
             conn.execute("ALTER TABLE windows ADD COLUMN image_ids_json TEXT")
         except Exception:
             pass  # Column already exists
+        # Migrate: add internal flag to messages (loop-internal feedback turns)
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN internal INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # Column already exists
 
 def save_window(window: Window) -> None:
-    with _get_conn() as conn:
+    # UPSERT, NOT "INSERT OR REPLACE": REPLACE is implemented as DELETE+INSERT,
+    # and with PRAGMA foreign_keys=ON the DELETE cascades — silently wiping the
+    # window's messages and outputs on every status update.
+    with closing(_get_conn()) as conn, conn:
         conn.execute("""
-            INSERT OR REPLACE INTO windows 
+            INSERT INTO windows
             (window_id, mode, image_id, created_at, status, current_code, share_token, is_shared, image_ids_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(window_id) DO UPDATE SET
+                mode = excluded.mode,
+                image_id = excluded.image_id,
+                created_at = excluded.created_at,
+                status = excluded.status,
+                current_code = excluded.current_code,
+                share_token = excluded.share_token,
+                is_shared = excluded.is_shared,
+                image_ids_json = excluded.image_ids_json
         """, (
             window.window_id, window.mode, window.image_id, window.created_at.isoformat(),
             window.status, window.current_code, window.share_token, 1 if window.is_shared else 0,
@@ -94,7 +115,7 @@ def save_window(window: Window) -> None:
         ))
 
 def save_image(metadata: ImageMetadata) -> None:
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         conn.execute("""
             INSERT OR REPLACE INTO images
             (image_id, original_filename, shape, dtype, channel_count, size_bytes,
@@ -109,7 +130,7 @@ def save_image(metadata: ImageMetadata) -> None:
         ))
 
 def load_image(image_id: str) -> Optional[ImageMetadata]:
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         row = conn.execute("SELECT * FROM images WHERE image_id = ?", (image_id,)).fetchone()
         if not row:
             return None
@@ -128,7 +149,7 @@ def load_image(image_id: str) -> Optional[ImageMetadata]:
         )
 
 def load_all_images() -> Dict[str, ImageMetadata]:
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         rows = conn.execute("SELECT * FROM images").fetchall()
         result = {}
         for row in rows:
@@ -149,18 +170,18 @@ def load_all_images() -> Dict[str, ImageMetadata]:
 
 def append_message(window_id: str, msg: Message) -> None:
     result_json = json.dumps(msg.execution_result.to_dict()) if msg.execution_result else None
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         conn.execute("""
-            INSERT INTO messages 
-            (window_id, turn_index, role, response_type, message, code, was_executed, execution_result_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages
+            (window_id, turn_index, role, response_type, message, code, was_executed, execution_result_json, internal)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             window_id, msg.turn_index, msg.role, msg.response_type, msg.message,
-            msg.code, 1 if msg.was_executed else 0, result_json
+            msg.code, 1 if msg.was_executed else 0, result_json, 1 if msg.internal else 0
         ))
 
 def append_output(window_id: str, output: GeneratedImage) -> None:
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         conn.execute("""
             INSERT INTO outputs 
             (window_id, image_id, description, path, preview_path, code, source_turn_index, produced_at, source_iteration)
@@ -172,7 +193,7 @@ def append_output(window_id: str, output: GeneratedImage) -> None:
 
 def list_window_summaries() -> List[Dict[str, Any]]:
     """Returns lightweight projections for the tab bar."""
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         rows = conn.execute("""
             SELECT window_id, mode, image_id, created_at, status, share_token, is_shared
             FROM windows
@@ -193,7 +214,7 @@ def list_window_summaries() -> List[Dict[str, Any]]:
         return summaries
 
 def load_window(window_id: str) -> Optional[Window]:
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         w_row = conn.execute("SELECT * FROM windows WHERE window_id = ?", (window_id,)).fetchone()
         if not w_row:
             return None
@@ -223,7 +244,8 @@ def load_window(window_id: str) -> Optional[Window]:
                 code=m["code"],
                 was_executed=bool(m["was_executed"]),
                 execution_result=exec_res,
-                turn_index=m["turn_index"]
+                turn_index=m["turn_index"],
+                internal=bool(m["internal"]),
             ))
             
         outputs = []
@@ -257,10 +279,10 @@ def load_window(window_id: str) -> Optional[Window]:
         )
 
 def delete_window(window_id: str) -> None:
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         conn.execute("DELETE FROM windows WHERE window_id = ?", (window_id,))
 
 def resolve_share_token(token: str) -> Optional[str]:
-    with _get_conn() as conn:
+    with closing(_get_conn()) as conn, conn:
         row = conn.execute("SELECT window_id FROM windows WHERE share_token = ?", (token,)).fetchone()
         return row["window_id"] if row else None

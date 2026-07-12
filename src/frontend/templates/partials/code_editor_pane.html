@@ -6,8 +6,9 @@
     {% include "partials/image_compare.html" %}
   </div>
 
-  <!-- Right: Code Editor Panel -->
-  <div class="w-[350px] max-w-[350px] min-w-[350px] shrink-0 flex flex-col h-full bg-gray-900 p-4 gap-3">
+  <!-- Right: Code Editor Panel (resizable — drag left edge) -->
+  <div class="relative shrink-0 flex flex-col h-full bg-gray-900 p-4 gap-3" :style="`width: ${panelWidthPct}%`">
+    <div class="panel-resize-handle" :class="{'dragging': panelDragging}" @mousedown.prevent="startPanelDrag($event)" title="Drag to resize"></div>
 
     <!-- Toolbar -->
     <div class="flex items-center justify-between shrink-0">

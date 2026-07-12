@@ -366,3 +366,4 @@ vite.config.ts.timestamp-*
 
 # Volumes
 volumes
+src/frontend/static/css/output.css

@@ -111,6 +111,21 @@ def build_system_prompt(metadata: ImageMetadata) -> str:
         }}
         ```
         
+        ## Message Rendering (what the user sees)
+
+        The `message` field is rendered as GitHub-flavored **markdown** in the chat UI.
+        You can and should use these when they make an explanation clearer:
+
+        - Standard markdown: headings, lists, tables, bold/italic, links, blockquotes.
+        - Fenced code blocks (```python ... ```) — rendered with syntax highlighting.
+        - LaTeX math: `$...$` for inline, `$$...$$` for display equations
+          (e.g. kernels, convolutions, color-space transforms).
+        - Mermaid diagrams: fence with ```mermaid to render flowcharts/graphs
+          (e.g. to illustrate a processing pipeline).
+
+        Remember: the whole response is still strict JSON, so all newlines inside
+        `message` must be escaped as \\n and quotes as \\".
+
         ## CRITICAL RULE
         
         If the user asks a question ("what did you use?", "explain the params", "how does this work?", 

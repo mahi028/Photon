@@ -5,7 +5,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: photon-app
     ports:
-      - "5050:5000"
+      - "8889:5000"
     volumes:
       # Mount the volumes directory to persist uploaded/generated images
       - ../volumes:/app/volumes

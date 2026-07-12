@@ -51,6 +51,8 @@ class Message:
     code: str | None = None           # present when response_type == "code" or illustrative
     was_executed: bool = False        # true only if this message's code actually ran
     execution_result: ExecutionResult | None = None # populated only if was_executed
+    internal: bool = False            # loop-internal turn (execution feedback / contract-violation
+                                      # feedback) — part of the LLM context, hidden in the chat UI
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +63,7 @@ class Message:
             "was_executed": self.was_executed,
             "execution_result": self.execution_result.to_dict() if self.execution_result else None,
             "turn_index": self.turn_index,
+            "internal": self.internal,
         }
 
 

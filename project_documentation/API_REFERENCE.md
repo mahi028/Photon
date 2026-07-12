@@ -101,6 +101,21 @@ Poll progress via `/stream`.
 
 ---
 
+## POST `/api/windows/<window_id>/stop`
+
+Request the in-flight LLM loop to stop (`mode == "llm"` only). Honored at the
+next safe boundary — before the next LLM call or sandbox execution; an
+execution already in flight runs to completion/timeout. Idempotent; a no-op
+on an idle window. The loop emits a `stopped` SSE event and persists a
+"⏹ Stopped by user." chat turn.
+
+**Response 202:**
+```json
+{ "status": "stop_requested", "window_id": "uuid4-hex" }
+```
+
+---
+
 ## GET `/api/windows/<window_id>/stream`
 
 SSE stream of LLM loop progress. `mode == "llm"` only.
@@ -111,6 +126,7 @@ data: {"event": "attempt", "attempt": 1, "max": 6, "message": "Generating code..
 data: {"event": "exec_result", "attempt": 1, "file_exists": false, "stderr": "..."}
 data: {"event": "done", "message": "...", "image_id": "...", "preview_url": "..."}
 data: {"event": "error", "message": "gave up after 6 attempts", "last_error": "..."}
+data: {"event": "stopped", "message": "⏹ Stopped by user."}
 ```
 
 ---

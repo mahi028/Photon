@@ -5,6 +5,49 @@
  * Listens for fe:open-window events from uploader.js.
  */
 
+/**
+ * Shared Alpine state mixin for the resizable right panel (chat / code editor).
+ * Drag the panel's left edge to resize; width persists in localStorage.
+ * Mirrors the left sidebar's drag behavior in index.html.
+ */
+function panelResizeState() {
+  // Percentage of the pane container, so the 45:55 panel:image default ratio
+  // holds at any viewport size. Clamped 25–65%.
+  const saved = parseFloat(localStorage.getItem('photon:panelWidthPct'));
+  return {
+    panelWidthPct: Number.isFinite(saved) ? Math.max(25, Math.min(65, saved)) : 45,
+    panelDragging: false,
+
+    startPanelDrag(e) {
+      const handle = e.currentTarget;
+      const panel = handle.parentElement;
+      const container = panel.parentElement;
+      const containerWidth = container.clientWidth || 1;
+      const startX = e.clientX;
+      const startPct = this.panelWidthPct;
+      this.panelDragging = true;
+
+      const onMouseMove = (ev) => {
+        // Panel sits on the right — dragging left grows it
+        const deltaPct = ((ev.clientX - startX) / containerWidth) * 100;
+        this.panelWidthPct = Math.max(25, Math.min(65, startPct - deltaPct));
+      };
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        this.panelDragging = false;
+        localStorage.setItem('photon:panelWidthPct', this.panelWidthPct.toFixed(1));
+      };
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    },
+  };
+}
+
 function windowManager() {
   return {
     windows: [],         // [{window_id, mode, image_id, metadata, label, previewUrl}]

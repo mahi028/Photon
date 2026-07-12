@@ -60,8 +60,8 @@
           </button>
         </div>
         
-        <!-- A simple readonly pre/code block instead of full CodeMirror for the dialog to keep it lightweight -->
-        <pre class="w-full h-full m-0 p-6 bg-[#0d1117] text-gray-300 text-sm overflow-auto font-mono" x-text="$store.codeDialog.code"></pre>
+        <!-- Readonly Dracula-highlighted code block (highlight.js via x-highlight directive) -->
+        <pre class="dracula-block w-full h-full p-6 text-sm"><code x-highlight="$store.codeDialog.code"></code></pre>
       </div>
     </div>
   </div>

@@ -28,6 +28,7 @@ const CODE_STUB = `def main(input_path: str, output_path_dir: str) -> str:
 
 function codeEditor(window) {
   return {
+    ...panelResizeState(),
     window,
     running: false,
     execResult: null,
@@ -69,24 +70,38 @@ function codeEditor(window) {
     },
 
     async _initCodeMirror() {
-      // CodeMirror 6 loaded via ESM CDN — use dynamic import fallback approach
+      // CodeMirror 6 loaded via ESM CDN.
+      // NOTE: "codemirror" must be pinned to 6.0.x — npm has a rogue 6.65.7
+      // release containing CodeMirror 5 code, so "@6" resolves to a package
+      // with no EditorView export. Also no ?bundle: bundling duplicates
+      // @codemirror/state per module, which breaks cross-module extensions.
       try {
         const { EditorView, basicSetup } = await import(
-          'https://esm.sh/codemirror@6?bundle'
+          'https://esm.sh/codemirror@6.0.2'
         );
         const { python } = await import(
-          'https://esm.sh/@codemirror/lang-python@6?bundle'
+          'https://esm.sh/@codemirror/lang-python@6'
         );
-        const { oneDark } = await import(
-          'https://esm.sh/@codemirror/theme-one-dark@6?bundle'
-        );
+        // Dracula theme, matching the code dialog / chat highlight theme.
+        // Falls back to oneDark if the theme package fails to load.
+        let theme;
+        try {
+          ({ dracula: theme } = await import(
+            'https://esm.sh/@uiw/codemirror-theme-dracula@4'
+          ));
+        } catch (e) {
+          console.warn('Dracula theme load failed, falling back to oneDark:', e);
+          ({ oneDark: theme } = await import(
+            'https://esm.sh/@codemirror/theme-one-dark@6'
+          ));
+        }
 
         const container = this.$refs.editorContainer;
         if (!container) return;
 
         this._cmView = new EditorView({
           doc: this.window.current_code || CODE_STUB,
-          extensions: [basicSetup, python(), oneDark],
+          extensions: [basicSetup, python(), theme],
           parent: container,
         });
       } catch (e) {

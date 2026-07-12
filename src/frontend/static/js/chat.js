@@ -8,6 +8,7 @@
 
 function chatPane(window) {
   return {
+    ...panelResizeState(),
     window,
     messages: [],       // [{role, response_type, content, code, was_executed, execution_result}]
     inputText: '',
@@ -26,7 +27,9 @@ function chatPane(window) {
         const res = await fetch(`/api/windows/${this.window.window_id}/history`);
         if (res.ok) {
           const data = await res.json();
-          this.messages = data.llm_conversation.map(m => ({
+          // internal=true turns are loop plumbing (execution feedback fed back
+          // to the LLM) — part of the LLM context but not shown in the chat UI
+          this.messages = data.llm_conversation.filter(m => !m.internal).map(m => ({
             role: m.role,
             response_type: m.response_type,
             content: m.message,
@@ -104,6 +107,15 @@ function chatPane(window) {
           content: `Error: ${e.message}`,
         });
         this.running = false;
+      }
+    },
+
+    async stopLoop() {
+      try {
+        await fetch(`/api/windows/${this.window.window_id}/stop`, {method: 'POST'});
+        this.statusMsg = 'Stopping...';
+      } catch (e) {
+        console.error('Stop request failed:', e);
       }
     },
 
@@ -228,6 +240,16 @@ function chatPane(window) {
           
           // Notify global app component for download dialog
           globalThis.dispatchEvent(new CustomEvent('fe:new-output', {detail: output}));
+        }
+
+        if (event.event === 'stopped') {
+          this.messages.push({
+            role: 'assistant',
+            response_type: 'chat',
+            content: event.message || '⏹ Stopped by user.',
+          });
+          this.running = false;
+          this.statusMsg = '';
         }
 
         if (event.event === 'error') {

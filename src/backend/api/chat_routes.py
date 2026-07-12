@@ -39,6 +39,17 @@ _executor = SubprocessExecutor()
 _sse_queues: dict[str, queue.Queue] = {}
 _sse_lock = threading.Lock()
 
+# Per-window stop flags: POST /stop sets the event; the loop checks it at
+# safe boundaries (before each LLM call, before each sandbox execution).
+_stop_events: dict[str, threading.Event] = {}
+
+
+def _get_stop_event(window_id: str) -> threading.Event:
+    with _sse_lock:
+        if window_id not in _stop_events:
+            _stop_events[window_id] = threading.Event()
+        return _stop_events[window_id]
+
 
 def _get_or_create_queue(window_id: str) -> queue.Queue:
     with _sse_lock:
@@ -80,10 +91,10 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
     manager.set_status(window_id, "running")
     system_prompt = build_system_prompt(metadata)
 
-    # Append the user message to the conversation
-    turn_index = len(window.llm_conversation)
-    window.llm_conversation.append(
-        Message(role="user", message=user_prompt, turn_index=turn_index)
+    # Append the user message to the conversation (write-through to SQLite — Section 5.3)
+    manager.add_message(
+        window_id,
+        Message(role="user", message=user_prompt, turn_index=len(window.llm_conversation)),
     )
 
     max_iter = config.MAX_LOOP_ITERATIONS
@@ -93,8 +104,14 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
 
     last_successful_output: str | None = None
     last_error: str | None = None
+    stop_event = _get_stop_event(window_id)
+    stopped = False
 
     for attempt in range(1, max_iter + 1):
+        if stop_event.is_set():
+            stopped = True
+            break
+
         _push_event(window_id, {
             "event": "attempt",
             "attempt": attempt,
@@ -108,15 +125,15 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
             system_prompt=system_prompt,
         )
 
-        # Record assistant message
-        window.llm_conversation.append(
-            Message(
-                role="assistant",
-                response_type=llm_result.response_type,
-                message=llm_result.message,
-                code=llm_result.code,
-                turn_index=len(window.llm_conversation),
-            )
+        # Build the assistant message. For "code" replies it is persisted AFTER
+        # execution, so the stored row carries was_executed/execution_result;
+        # chat/error replies are persisted immediately (write-through — Section 5.3).
+        assistant_msg = Message(
+            role="assistant",
+            response_type=llm_result.response_type,
+            message=llm_result.message,
+            code=llm_result.code,
+            turn_index=len(window.llm_conversation),
         )
 
         # Push message to UI
@@ -129,15 +146,19 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
         })
 
         if llm_result.response_type == "error":
+            manager.add_message(window_id, assistant_msg)
             # Feed the error back as a user turn for the LLM to correct itself
             feedback = f"Error: {llm_result.message}\nPlease fix your JSON response."
-            window.llm_conversation.append(
-                Message(role="user", message=feedback, turn_index=len(window.llm_conversation))
+            manager.add_message(
+                window_id,
+                Message(role="user", message=feedback,
+                        turn_index=len(window.llm_conversation), internal=True),
             )
             last_error = llm_result.message
             continue
 
         if llm_result.response_type == "chat":
+            manager.add_message(window_id, assistant_msg)
             _push_event(window_id, {
                 "event": "chat_turn",
                 "message": llm_result.message,
@@ -145,6 +166,12 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
             break
 
         # response_type == "code" — execute the code
+        # Last stop check before committing to a (up to timeout-long) execution.
+        if stop_event.is_set():
+            manager.add_message(window_id, assistant_msg)  # persisted, never executed
+            stopped = True
+            break
+
         _push_event(window_id, {
             "event": "executing",
             "attempt": attempt,
@@ -168,13 +195,11 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
             "time_taken": exec_result.time_taken_seconds,
         })
 
-        if exec_result.file_exists and exec_result.output_path:
-            last_successful_output = exec_result.output_path
-
-        # Mark assistant message as executed
-        last_msg = window.llm_conversation[-1]
-        last_msg.was_executed = True
-        last_msg.execution_result = exec_result
+        # Attach execution result, then persist the assistant turn (so the
+        # stored row includes was_executed/execution_result — Section 5.3)
+        assistant_msg.was_executed = True
+        assistant_msg.execution_result = exec_result
+        manager.add_message(window_id, assistant_msg)
 
         if exec_result.file_exists:
             # Success — stop immediately. No more LLM calls needed.
@@ -183,12 +208,14 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
 
         # Only append error feedback to conversation when execution actually failed
         feedback_msg = build_execution_feedback_message(exec_result, attempt, max_iter)
-        window.llm_conversation.append(
+        manager.add_message(
+            window_id,
             Message(
                 role="user",
                 message=feedback_msg,
                 turn_index=len(window.llm_conversation),
-            )
+                internal=True,
+            ),
         )
         last_error = exec_result.stderr or exec_result.traceback
 
@@ -200,6 +227,19 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
             "last_error": last_error or "Unknown error",
         })
 
+    if stopped:
+        # User aborted the loop — record a visible chat turn and end the stream.
+        manager.add_message(
+            window_id,
+            Message(
+                role="assistant",
+                response_type="chat",
+                message="⏹ Stopped by user.",
+                turn_index=len(window.llm_conversation),
+            ),
+        )
+        _push_event(window_id, {"event": "stopped", "message": "⏹ Stopped by user."})
+
     # Extract the winning code
     code = None
     for msg in reversed(window.llm_conversation):
@@ -209,8 +249,11 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
 
     # Run on ALL images in the batch (primary already ran above; re-run to get output,
     # then run remaining images). For simplicity we just run all image_ids now.
-    if last_successful_output and code:
+    if last_successful_output and code and not stopped:
         for slot_idx, img_id in enumerate(window.image_ids):
+            if stop_event.is_set():
+                _push_event(window_id, {"event": "stopped", "message": "⏹ Stopped during batch run."})
+                break
             img_meta = image_registry.get(img_id)
             if not img_meta:
                 continue
@@ -310,9 +353,10 @@ def send_message(window_id: str):
     if not prompt:
         return jsonify({"error": "prompt is required"}), 400
 
-    # Reset any old queue for this window
+    # Reset any old queue and stop flag for this window
     with _sse_lock:
         _sse_queues[window_id] = queue.Queue()
+    _get_stop_event(window_id).clear()
 
     thread = threading.Thread(
         target=_run_llm_loop,
@@ -322,6 +366,25 @@ def send_message(window_id: str):
     thread.start()
 
     return jsonify({"status": "started", "window_id": window_id}), 202
+
+
+@chat_bp.route("/windows/<window_id>/stop", methods=["POST"])
+def stop_loop(window_id: str):
+    """Request the in-flight LLM loop for this window to stop.
+
+    The loop honors the flag at its next safe boundary (before the next LLM
+    call or sandbox execution) — an execution already in flight runs to
+    completion/timeout. Idempotent: stopping an idle window is a no-op.
+    """
+    manager = get_manager()
+    window = manager.get_window(window_id)
+    if not window:
+        return jsonify({"error": "Window not found"}), 404
+    if window.mode != "llm":
+        return jsonify({"error": "This endpoint is for LLM-mode windows only"}), 400
+
+    _get_stop_event(window_id).set()
+    return jsonify({"status": "stop_requested", "window_id": window_id}), 202
 
 
 @chat_bp.route("/windows/<window_id>/stream", methods=["GET"])

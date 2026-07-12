@@ -3,7 +3,8 @@
 ## Component Map
 
 ```
-Browser (Jinja2 + Tailwind + Alpine.js + CodeMirror 6)
+Browser (Jinja2 + Tailwind + Alpine.js + CodeMirror 6
+         + marked/DOMPurify/highlight.js/KaTeX/mermaid — see DESIGN.md "Code & Markdown Rendering")
    |  REST + SSE (EventSource)
    v
 Flask App  (src/backend/)
@@ -85,5 +86,9 @@ returns a synthetic error result so the loop can feed it back without crashing.
 ## Key Design Decisions
 - Flask never exec()s code in-process. All code runs via Executor.
 - Both window modes share the same Executor, same function contract, same whitelist.
-- Session state is in-memory (Window registry dict). Files persist in volumes/.
+- Session state is durable: SQLite (`volumes/sessions.db`, absolute path from config) is the
+  source of truth; `WindowManager` is a capped lazy-LRU cache over it (Section 5 of the spec).
+  Every turn — including loop-internal execution-feedback turns (`internal=1`) — and every
+  output is written through to SQLite in the request that produced it. Image bytes stay in
+  volumes/; image metadata is persisted in the `images` table and rehydrated at startup.
 - Metadata formatting is shared between system prompt and UI — one function.
