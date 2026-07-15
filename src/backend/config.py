@@ -1,9 +1,11 @@
 """Application configuration loaded from environment variables.
 
 LLM_PROVIDER controls which LLM backend is used:
-  gemini    — Google Gemini via google-genai SDK (default)
-  openai    — OpenAI or any OpenAI-compatible API (set OPENAI_BASE_URL for custom endpoints,
-              e.g. Ollama, Together, Groq, Mistral, etc.)
+  gemini     — Google Gemini via google-genai SDK (default)
+  openai     — OpenAI or any OpenAI-compatible API (set OPENAI_BASE_URL for custom endpoints,
+               e.g. Ollama, Together, Groq, Mistral, etc.)
+  openrouter — OpenRouter (OpenAI-compatible; model runtime-selectable from a
+               dropdown backed by GET https://openrouter.ai/api/v1/models)
 """
 
 import os
@@ -33,10 +35,22 @@ class Config:
     #       https://api.groq.com/openai/v1 (Groq)
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
 
+    # ---- OpenRouter (OpenAI-compatible aggregator) ----
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    # Default model at startup; runtime-overridable via POST /api/llm/model
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+
     @property
     def active_model(self) -> str:
-        """Resolved model name for the currently active LLM provider."""
-        return self.OPENAI_MODEL if self.LLM_PROVIDER == "openai" else self.GEMINI_MODEL
+        """Resolved model name for the currently active LLM provider (startup default;
+        the openrouter provider may be overridden at runtime — see llm client)."""
+        provider = self.LLM_PROVIDER
+        if provider == "openai":
+            return self.OPENAI_MODEL
+        if provider == "openrouter":
+            return self.OPENROUTER_MODEL
+        return self.GEMINI_MODEL
 
     # ---- LLM loop budget ----
     MAX_LOOP_ITERATIONS: int = 6

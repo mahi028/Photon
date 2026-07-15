@@ -46,6 +46,36 @@ OR (application/json):
 
 ---
 
+## GET `/api/llm/info`
+
+Active LLM provider and model. For `openrouter`, includes the selectable model
+catalog (fetched from `GET https://openrouter.ai/api/v1/models` with the
+configured key, cached in memory for 1h).
+
+**Response 200:**
+```json
+{
+  "provider": "openrouter",
+  "model": "openai/gpt-4o-mini",
+  "model_selectable": true,
+  "models": ["ai21/jamba-large-1.7", "..."]
+}
+```
+(`models` is `[]` and `model_selectable` is `false` for gemini/openai;
+`models_error` is set if the catalog fetch failed.)
+
+---
+
+## POST `/api/llm/model`
+
+Switch the active OpenRouter model at runtime (validated against the catalog;
+in-memory only — resets to `OPENROUTER_MODEL` on restart). 400 for other providers.
+
+**Request:** `{ "model": "ai21/jamba-large-1.7" }`
+**Response 200:** `{ "status": "ok", "model": "ai21/jamba-large-1.7" }`
+
+---
+
 ## POST `/api/windows`
 
 Create a new window.

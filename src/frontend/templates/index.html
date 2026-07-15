@@ -21,6 +21,26 @@
       <span class="text-xs text-gray-500 hidden sm:block">AI-Powered Image Processing</span>
     </div>
     <div class="flex items-center gap-3">
+      <!-- LLM provider / model -->
+      <template x-if="llmModelSelectable">
+        <div class="flex items-center gap-2" title="OpenRouter model">
+          <span class="text-xs text-gray-500 hidden md:block">Model</span>
+          <select
+            :value="llmModel"
+            @change="switchLlmModel($event.target.value)"
+            :disabled="llmModelSwitching || llmModels.length === 0"
+            class="bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 px-2 py-1.5 max-w-[260px] focus:outline-none focus:border-indigo-500 disabled:opacity-50">
+            <template x-for="m in llmModels" :key="m">
+              <option :value="m" :selected="m === llmModel" x-text="m"></option>
+            </template>
+          </select>
+          <span x-show="llmModelSwitching" class="animate-spin w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full"></span>
+        </div>
+      </template>
+      <template x-if="llmProvider && !llmModelSelectable">
+        <span class="text-xs text-gray-500 hidden md:block" :title="'Provider: ' + llmProvider"
+              x-text="llmProvider + ' · ' + llmModel"></span>
+      </template>
       <button
         @click="showDownload = true"
         class="btn-secondary text-sm flex items-center gap-2"
@@ -168,6 +188,50 @@ function app() {
     showDownload: false,
     showExample: false,
     allOutputs: [],   // populated by windowManager.js via events
+
+    // LLM provider info / OpenRouter model selection
+    llmProvider: null,
+    llmModel: null,
+    llmModelSelectable: false,
+    llmModels: [],
+    llmModelSwitching: false,
+
+    async loadLlmInfo() {
+      try {
+        const res = await fetch('/api/llm/info');
+        if (!res.ok) return;
+        const d = await res.json();
+        this.llmProvider = d.provider;
+        this.llmModel = d.model;
+        this.llmModelSelectable = d.model_selectable;
+        this.llmModels = d.models || [];
+      } catch (e) {
+        console.warn('LLM info fetch failed:', e);
+      }
+    },
+
+    async switchLlmModel(model) {
+      if (!model || model === this.llmModel) return;
+      this.llmModelSwitching = true;
+      try {
+        const res = await fetch('/api/llm/model', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({model}),
+        });
+        const d = await res.json();
+        if (res.ok) {
+          this.llmModel = d.model;
+        } else {
+          alert('Model switch failed: ' + (d.error || 'unknown'));
+          await this.loadLlmInfo();
+        }
+      } catch (e) {
+        alert('Model switch failed: ' + e.message);
+      } finally {
+        this.llmModelSwitching = false;
+      }
+    },
     sidebarWidth: 288,
     sidebarCollapsed: false,
     // Legacy single-image full screen (keep for backward compat)
@@ -282,6 +346,7 @@ function app() {
     },
 
     async init() {
+      this.loadLlmInfo();
       // Listen for new outputs from any window (real-time)
       window.addEventListener('fe:new-output', (e) => {
         // Avoid duplicates if output was already hydrated from server

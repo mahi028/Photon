@@ -26,7 +26,7 @@ Flask App  (src/backend/)
    └── utils/               — slugify, validation
 volumes/
    ├── uploads/             — original full-res, keyed by image_id
-   ├── outputs/             — results, keyed by window_id/
+   ├── outputs/             — results: outputs/{window_id}/{run_id}/slot{N}/ (unique dir per run+slot)
    └── tmp_exec/            — per-run scratch (auto-cleaned)
 ```
 

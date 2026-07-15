@@ -45,8 +45,6 @@ def run_code(window_id: str):
     manager.set_status(window_id, "running")
 
     run_num = window.next_run_number()
-    output_dir = config.OUTPUTS_DIR / window_id
-    output_dir.mkdir(parents=True, exist_ok=True)
     
     image_registry = get_image_registry()
     
@@ -59,12 +57,17 @@ def run_code(window_id: str):
             continue
             
         input_path = metadata.path
-        
+
+        # Unique dir per run + per slot — user code often saves a fixed filename,
+        # so a shared dir makes slots/runs overwrite each other's outputs.
+        slot_output_dir = config.OUTPUTS_DIR / window_id / f"run{run_num}" / f"slot{slot_idx}"
+        slot_output_dir.mkdir(parents=True, exist_ok=True)
+
         # Execute
         result = _executor.execute(
             code=code,
             input_path=input_path,
-            output_dir=str(output_dir),
+            output_dir=str(slot_output_dir),
             timeout=config.EXECUTION_TIMEOUT_SECONDS,
         )
         

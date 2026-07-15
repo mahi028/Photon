@@ -31,7 +31,9 @@ def create_app() -> Flask:
     from .api.download_routes import download_bp
     from .api.example_routes import example_bp
     from .api.shared_routes import shared_bp
+    from .api.llm_routes import llm_bp
 
+    app.register_blueprint(llm_bp, url_prefix="/api")
     app.register_blueprint(upload_bp, url_prefix="/api")
     app.register_blueprint(window_bp, url_prefix="/api")
     app.register_blueprint(chat_bp, url_prefix="/api")

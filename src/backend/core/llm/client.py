@@ -1,8 +1,10 @@
 """Multi-provider LLM client.
 
-Dispatches to either:
+Dispatches to:
   - Google Gemini  (via google-genai SDK)  when LLM_PROVIDER=gemini  (default)
   - OpenAI / any OpenAI-compatible API     when LLM_PROVIDER=openai
+  - OpenRouter (OpenAI-compatible)         when LLM_PROVIDER=openrouter
+    (model is runtime-selectable — see get/set_openrouter_model and llm_routes)
 
 OpenAI-compatible means: any service that implements the /chat/completions endpoint —
 e.g. OpenAI, Ollama (local), Together AI, Groq, Mistral, LM Studio, Anyscale, etc.
@@ -240,6 +242,61 @@ def _send_openai(conversation: list[Message], system_prompt: str) -> LLMTurnResu
 
 
 # ---------------------------------------------------------------------------
+# OpenRouter client (OpenAI-compatible aggregator)
+# ---------------------------------------------------------------------------
+
+_openrouter_client = None
+
+# Runtime-selectable OpenRouter model (in-memory; resets to OPENROUTER_MODEL on
+# restart). Set via POST /api/llm/model (llm_routes.py).
+_openrouter_model: str | None = None
+
+
+def get_openrouter_model() -> str:
+    return _openrouter_model or config.OPENROUTER_MODEL
+
+
+def set_openrouter_model(model: str) -> None:
+    global _openrouter_model
+    _openrouter_model = model
+
+
+def _get_openrouter_client():
+    global _openrouter_client
+    if _openrouter_client is None:
+        from openai import OpenAI
+        _openrouter_client = OpenAI(
+            api_key=config.OPENROUTER_API_KEY,
+            base_url=config.OPENROUTER_BASE_URL,
+        )
+    return _openrouter_client
+
+
+def _send_openrouter(conversation: list[Message], system_prompt: str) -> LLMTurnResult:
+    """Call OpenRouter via its OpenAI-compatible /chat/completions endpoint."""
+    try:
+        client = _get_openrouter_client()
+        messages = [{"role": "system", "content": system_prompt}] + _build_messages(conversation)
+
+        response = client.chat.completions.create(
+            model=get_openrouter_model(),
+            messages=messages,
+            max_tokens=4096,
+            temperature=0.2,
+        )
+
+        raw_text = response.choices[0].message.content or ""
+        return _parse_llm_response(raw_text)
+
+    except Exception as e:
+        logger.error("OpenRouter API error: %s", e)
+        return LLMTurnResult(
+            response_type="error",
+            message=f"OpenRouter API error: {e}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
 
@@ -263,6 +320,8 @@ def send_turn(
 
     if provider == "openai":
         return _send_openai(conversation, system_prompt)
+    elif provider == "openrouter":
+        return _send_openrouter(conversation, system_prompt)
     elif provider == "gemini":
         return _send_gemini(conversation, system_prompt)
     else:
@@ -271,6 +330,6 @@ def send_turn(
             response_type="error",
             message=(
                 f"Unknown LLM_PROVIDER '{provider}'. "
-                f"Set LLM_PROVIDER=gemini or LLM_PROVIDER=openai in .env."
+                f"Set LLM_PROVIDER=gemini, openai, or openrouter in .env."
             ),
         )

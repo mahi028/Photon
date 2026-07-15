@@ -98,7 +98,10 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
     )
 
     max_iter = config.MAX_LOOP_ITERATIONS
-    output_dir = config.OUTPUTS_DIR / window_id
+    # Unique dir per run + per slot: generated code often saves a fixed filename
+    # (e.g. "output.png"), so a shared dir makes slots/turns overwrite each other.
+    exec_run_id = uuid.uuid4().hex[:8]
+    output_dir = config.OUTPUTS_DIR / window_id / exec_run_id / "slot0"
     output_dir.mkdir(parents=True, exist_ok=True)
     input_path = metadata.path
 
@@ -258,7 +261,7 @@ def _run_llm_loop(window_id: str, user_prompt: str) -> None:
             if not img_meta:
                 continue
             img_input_path = img_meta.path
-            img_output_dir = config.OUTPUTS_DIR / window_id
+            img_output_dir = config.OUTPUTS_DIR / window_id / exec_run_id / f"slot{slot_idx}"
             img_output_dir.mkdir(parents=True, exist_ok=True)
 
             # Primary image output is already in last_successful_output
