@@ -1,5 +1,5 @@
 [project]
-name = "featureexplorer"
+name = "Photon"
 version = "0.1.0"
 description = "LLM-Driven Image Feature/Transformation Visualizer — Flask + Gemini/OpenAI + sandboxed code execution"
 requires-python = ">=3.12"
@@ -12,6 +12,7 @@ dependencies = [
     "opencv-python-headless>=5.0.0.93",
     "pillow>=12.3.0",
     "pydantic>=2.6.0",
+    "pydensecrf2>=1.1",
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
     "scikit-image>=0.26.0",
