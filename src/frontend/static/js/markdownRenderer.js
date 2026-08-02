@@ -157,6 +157,39 @@
   globalThis.renderMarkdownInto = renderMarkdownInto;
   globalThis.renderCodeInto = renderCodeInto;
 
+  /**
+   * Copy text to the clipboard, working outside secure contexts too.
+   * navigator.clipboard only exists on HTTPS/localhost — when the app is
+   * hosted on a LAN machine and reached over plain http://<ip>, it's
+   * undefined, so fall back to the legacy execCommand('copy') path.
+   * Returns a Promise resolving true on success, false on failure.
+   */
+  globalThis.copyTextToClipboard = async function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) {
+        // fall through to legacy path
+      }
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      console.error('Clipboard copy failed:', e);
+      return false;
+    }
+  };
+
   // -------------------------------------------------------------------------
   // Alpine directives
   // -------------------------------------------------------------------------

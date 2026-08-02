@@ -15,13 +15,10 @@ from ...models.dto import ImageMetadata
 from ...config import config
 
 
-# Whitelist string shown in system prompt and UI
-_LIBRARY_WHITELIST = (
-    "numpy, PIL/Pillow, cv2 (opencv-python-headless), scipy, "
-    "skimage (scikit-image), tifffile. "
-    "Standard library: os, pathlib, math, json, re, io, typing. "
-    "NO matplotlib, NO subprocess, NO socket, NO requests, NO threading."
-)
+# Whitelist string shown in system prompt and UI — auto-synced from
+# pyproject.toml at config import time (dep_sync.py), same source as the
+# sandbox's actual AST allowlist, so the LLM never sees a stale library list.
+_LIBRARY_WHITELIST = config.SANDBOX_LIBRARY_WHITELIST
 
 
 def format_metadata_for_prompt(metadata: ImageMetadata) -> str:
@@ -32,18 +29,24 @@ def format_metadata_for_prompt(metadata: ImageMetadata) -> str:
     return json.dumps(metadata.to_dict(), indent=2)
 
 
-def build_system_prompt(metadata: ImageMetadata) -> str:
-    """Assemble the full system prompt for an LLM window.
+def build_system_prompt(metadata: ImageMetadata,
+                        custom_nodes: list[dict] | None = None) -> str:
+    """Assemble the full system prompt for a session.
 
     Args:
-        metadata: ImageMetadata for the image attached to this window.
+        metadata: ImageMetadata for the image attached to this session.
+        custom_nodes: the user's saved custom nodes, so the LLM reuses them
+            (by custom_node_id) instead of regenerating equivalent code.
 
     Returns:
         Complete system prompt string.
     """
+    from ..pipeline import registry
+
     metadata_block = format_metadata_for_prompt(metadata)
     max_iter = config.MAX_LOOP_ITERATIONS
     timeout = config.EXECUTION_TIMEOUT_SECONDS
+    op_catalog = registry.catalog_for_prompt(custom_nodes)
 
     return dedent(f"""\
         You are an image-processing assistant and code generator.
@@ -57,7 +60,13 @@ def build_system_prompt(metadata: ImageMetadata) -> str:
         {metadata_block}
         ```
         
-        ## Available Libraries
+        ## Pipeline Operation Catalog (use these before writing code)
+
+        Format: `name [category] (inputs) -> (outputs) params(...) — description`
+
+        {op_catalog}
+
+        ## Available Libraries (for `code` responses and custom nodes)
 
         {_LIBRARY_WHITELIST}
 
@@ -85,8 +94,59 @@ def build_system_prompt(metadata: ImageMetadata) -> str:
         
         Respond with ONLY valid JSON — no markdown fences, no commentary outside JSON.
         
-        You have two response types:
-        
+        You have three response types: "pipeline", "code", and "chat".
+
+        **`response_type: "pipeline"`** — PREFER THIS whenever the request decomposes
+        into the catalog operations listed below. Most image-processing requests do:
+        thresholding, morphology, colour conversion, filtering, masking, feature maps.
+        Composing existing ops is faster, reproducible, editable by the user in the
+        visual editor, and far less error-prone than writing fresh code.
+
+        ```json
+        {{
+          "response_type": "pipeline",
+          "message": "short note on the approach (shown as a card)",
+          "pipeline": {{
+            "nodes": [
+              {{"id": "gray", "op": "to_grayscale", "params": {{}}}},
+              {{"id": "thr", "op": "otsu_threshold", "params": {{"nbins": 256}}}}
+            ],
+            "edges": [
+              {{"from": ["input", "image"], "to": ["gray", "image"]}},
+              {{"from": ["gray", "gray"], "to": ["thr", "image"]}}
+            ]
+          }}
+        }}
+        ```
+
+        Rules for pipelines:
+        - `"input"` is the implicit source node: `["input", "image"]` is the user's image.
+        - Every edge is `{{"from": [node_id, output_port], "to": [node_id, input_port]}}`.
+          Port names come from the catalog — use them exactly.
+        - Every required input port of every node must be connected.
+        - Port types must match. `IMAGE_RGB` does NOT auto-convert to `IMAGE_GRAY` —
+          insert an explicit `to_grayscale` node. `MASK`/`FLOAT_MAP` DO auto-convert
+          to grayscale where a node expects an image.
+        - The pipeline is validated before it runs; if it fails you get the exact
+          issues back and can correct it (this counts against your attempt budget).
+
+        If ONE step has no catalog op, keep the rest as ops and add a single custom
+        node inline — do not abandon the pipeline and write everything as code:
+        ```json
+        {{"id": "myop", "custom": {{
+            "name": "unique_snake_case_name",
+            "code": "def node(inputs, params):\\n    import numpy as np\\n    return {{'out': ...}}",
+            "ports": {{"inputs": [{{"name": "img", "type": "IMAGE_GRAY"}}],
+                      "outputs": [{{"name": "out", "type": "MASK"}}]}},
+            "params": [{{"name": "k", "kind": "int", "default": 3}}]
+        }}, "params": {{"k": 5}}}}
+        ```
+        Custom node code must define `node(inputs, params) -> dict` (both are dicts;
+        return one entry per declared output port), obeys the same library whitelist
+        as `code` responses, and is saved to the user's library — reuse it next time
+        via `{{"id": "...", "custom_node_id": "<id from the catalog>"}}` instead of
+        regenerating it.
+
         **`response_type: "chat"`** — Use this for:
         - Answering questions about the image, your approach, parameters, algorithms, etc.
         - Explaining what you just did or what a technique means
@@ -102,10 +162,11 @@ def build_system_prompt(metadata: ImageMetadata) -> str:
         }}
         ```
         
-        **`response_type: "code"`** — Use this ONLY when:
-        - The user explicitly asks you to process, transform, or modify the image
-        - The user says "apply", "run", "generate", "convert", "do X to the image", etc.
-        - NOT for answering questions, NOT for explaining your previous work
+        **`response_type: "code"`** — Use this ONLY when the transform genuinely
+        cannot be expressed as a pipeline of catalog ops (plus at most one custom
+        node): novel algorithms, multi-stage logic with branching, anything needing
+        libraries or control flow the catalog can't express. Do NOT use `code` to
+        re-implement something the catalog already does.
         
         ```json
         {{
@@ -201,3 +262,52 @@ def build_execution_feedback_message(
         lines.append("✗ No output file found. Fix the code and respond with response_type='code'.")
 
     return "\n".join(lines)
+
+
+def build_pipeline_feedback_message(issues: list, attempt: int, max_attempts: int) -> str:
+    """Feedback turn for a pipeline that failed static validation.
+
+    Mirrors build_execution_feedback_message: the LLM sees exactly what was
+    wrong and gets one more shot within the same attempt budget.
+    """
+    remaining = max_attempts - attempt
+    lines = [
+        f"## Pipeline Validation Failed (attempt {attempt}/{max_attempts}, {remaining} remaining)",
+        "",
+        "Your pipeline was NOT run. Fix these issues and resend a corrected",
+        "`response_type: \"pipeline\"` (or fall back to `\"code\"` if the catalog",
+        "genuinely cannot express this):",
+        "",
+    ]
+    for issue in issues:
+        node = issue.get("node_id") or "graph"
+        lines.append(f"- [{node}] {issue.get('message')}")
+    lines += [
+        "",
+        "Reminders: connect every required input port; port names must match the",
+        "catalog exactly; IMAGE_RGB does not auto-convert to IMAGE_GRAY (insert a",
+        "to_grayscale node); `[\"input\", \"image\"]` is the source image.",
+    ]
+    return "\n".join(lines)
+
+
+def build_pipeline_result_message(run_result: dict, attempt: int, max_attempts: int) -> str:
+    """Feedback turn after a pipeline actually ran (success or runtime error)."""
+    remaining = max_attempts - attempt
+    if run_result.get("error"):
+        return "\n".join([
+            f"## Pipeline Run Failed (attempt {attempt}/{max_attempts}, {remaining} remaining)",
+            "",
+            f"- failed_node: {run_result.get('failed_node')}",
+            f"- error: {run_result['error']}",
+            "",
+            "Adjust parameters or node choice and resend a corrected pipeline.",
+        ])
+    outputs = run_result.get("outputs") or []
+    return "\n".join([
+        f"## Pipeline Run Succeeded (attempt {attempt}/{max_attempts})",
+        "",
+        f"- outputs produced: {len(outputs)}",
+        "",
+        "Respond with response_type='chat' to explain the result to the user.",
+    ])

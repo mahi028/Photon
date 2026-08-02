@@ -1,29 +1,51 @@
 /**
- * downloadDialog.js — Alpine.js component for the download dialog.
- *
- * Collects selected image_ids and posts to POST /api/download,
- * triggering a browser file download of the returned zip.
+ * downloadDialog.js — Alpine.js component for the download dialog (D-020,
+ * session-scoped: only the session it was opened from, via
+ * POST /api/sessions/<id>/download).
  */
 
 function downloadDialog() {
   return {
+    sessionId: null,
+    outputs: [],
     selected: [],
+    loading: false,
     downloading: false,
+    error: null,
 
-    toggleAll() {
-      if (this.selected.length === this.allOutputs.length) {
-        this.selected = [];
-      } else {
-        this.selected = this.allOutputs.map(o => o.image_id);
+    init() {
+      window.addEventListener('fe:download-opened', (e) => this.loadOutputs(e.detail));
+    },
+
+    async loadOutputs(sessionId) {
+      this.sessionId = sessionId;
+      this.outputs = [];
+      this.selected = [];
+      this.error = null;
+      this.loading = true;
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/outputs`);
+        if (!res.ok) throw new Error('Failed to load outputs');
+        this.outputs = await res.json();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.loading = false;
       }
     },
 
+    toggleAll() {
+      this.selected = this.selected.length === this.outputs.length
+        ? []
+        : this.outputs.map(o => o.image_id);
+    },
+
     async downloadZip() {
-      if (this.selected.length === 0 || this.downloading) return;
+      if (this.selected.length === 0 || this.downloading || !this.sessionId) return;
       this.downloading = true;
 
       try {
-        const res = await fetch('/api/download', {
+        const res = await fetch(`/api/sessions/${this.sessionId}/download`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({image_ids: this.selected}),
@@ -35,18 +57,17 @@ function downloadDialog() {
           return;
         }
 
-        // Trigger browser download
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'feature_explorer_outputs.zip';
+        a.download = `session_${this.sessionId.slice(0, 8)}_outputs.zip`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        this.showDownload = false;
+        this.$store.downloadDialog.close();
       } catch (e) {
         alert(`Download error: ${e.message}`);
       } finally {

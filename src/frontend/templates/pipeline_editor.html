@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline Editor — Photon{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<!-- The pipeline id is injected as a JS global below rather than interpolated
+     into x-data: |tojson emits surrounding double quotes, which terminate a
+     double-quoted HTML attribute and silently break Alpine's expression. -->
+<div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden"
+     x-data="pipelineEditor(window.PIPELINE_ID)">
+
+  <!-- Top bar -->
+  <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3 min-w-0 flex-1">
+      <a href="/pipelines" class="text-gray-400 hover:text-white p-1 rounded transition-colors shrink-0" title="Back to pipelines">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      </a>
+      <input type="text" x-model="title" :disabled="isPreset" @input="dirty = true"
+             class="bg-transparent border border-transparent hover:border-gray-700 focus:border-indigo-500 rounded px-2 py-1 text-sm font-semibold text-gray-100 focus:outline-none min-w-0 flex-1 max-w-md disabled:opacity-70" />
+      <template x-if="isPreset">
+        <span class="badge-llm shrink-0">preset — read-only</span>
+      </template>
+      <template x-if="dirty && !isPreset">
+        <span class="text-[11px] text-amber-400 shrink-0">unsaved</span>
+      </template>
+    </div>
+
+    <div class="flex items-center gap-2 shrink-0">
+      <select x-model="selectedSessionId"
+              class="bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 px-2 py-1.5 w-32 md:w-44 focus:outline-none focus:border-indigo-500">
+        <option value="">Run against…</option>
+        <template x-for="s in sessions" :key="s.session_id">
+          <option :value="s.session_id" x-text="s.title"></option>
+        </template>
+      </select>
+      <button @click="run()" :disabled="running || !selectedSessionId" class="btn-primary text-sm px-3 py-1.5 disabled:opacity-50">
+        <span x-show="!running">Run</span>
+        <span x-show="running" class="flex items-center gap-1.5">
+          <span class="animate-spin w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span> Running
+        </span>
+      </button>
+      <template x-if="!isPreset">
+        <button @click="save()" :disabled="saving" class="btn-secondary text-sm px-3 py-1.5 disabled:opacity-50"
+                x-text="saving ? 'Saving…' : 'Save'"></button>
+      </template>
+      <template x-if="isPreset">
+        <button @click="cloneToMine()" class="btn-secondary text-sm px-3 py-1.5">Clone to edit</button>
+      </template>
+    </div>
+  </header>
+
+  <template x-if="loadFailed">
+    <div class="flex-1 flex items-center justify-center text-sm text-red-400 p-6 text-center">
+      Could not load the editor (Drawflow CDN or pipeline fetch failed). Check your
+      connection and reload.
+    </div>
+  </template>
+
+  <div class="flex flex-1 min-h-0 overflow-hidden" x-show="!loadFailed">
+
+    <!-- Palette -->
+    <aside class="w-56 lg:w-64 shrink-0 border-r border-gray-800 bg-gray-950 flex flex-col">
+      <div class="p-3 shrink-0 space-y-2">
+        <input type="text" x-model="paletteFilter" placeholder="Filter ops…"
+               class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+        <button @click="addInputNode()" :disabled="isPreset"
+                class="btn-secondary w-full text-xs py-1.5 disabled:opacity-50">+ Source image</button>
+      </div>
+      <div class="flex-1 overflow-y-auto custom-scrollbar px-2 pb-3 space-y-3">
+        <template x-for="[cat, ops] in Object.entries(paletteGroups)" :key="cat">
+          <div>
+            <p class="text-[10px] uppercase tracking-wide text-gray-500 px-1 mb-1" x-text="cat"></p>
+            <div class="space-y-1">
+              <template x-for="op in ops" :key="op.name">
+                <button @click="addOpNode(op)" :disabled="isPreset"
+                        class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-gray-900 border border-transparent hover:border-gray-800 transition-colors disabled:opacity-50 group">
+                  <p class="text-xs font-mono text-gray-200 truncate" x-text="op.name"></p>
+                  <p class="text-[10px] text-gray-600 line-clamp-2 group-hover:text-gray-500" x-text="op.doc"></p>
+                </button>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </aside>
+
+    <!-- Canvas -->
+    <main class="flex-1 min-w-0 relative bg-gray-950">
+      <div x-ref="canvas" id="drawflow" class="absolute inset-0"></div>
+
+      <!-- canvas controls -->
+      <div class="absolute bottom-3 left-3 flex gap-1.5 z-10">
+        <button @click="zoomOut()" class="w-8 h-8 rounded-lg bg-gray-900/90 border border-gray-700 text-gray-300 hover:text-white text-sm">−</button>
+        <button @click="zoomIn()" class="w-8 h-8 rounded-lg bg-gray-900/90 border border-gray-700 text-gray-300 hover:text-white text-sm">+</button>
+        <button @click="validate()" class="px-3 h-8 rounded-lg bg-gray-900/90 border border-gray-700 text-gray-300 hover:text-white text-xs">Validate</button>
+        <template x-if="selectedNodeId && !isPreset">
+          <button @click="removeSelected()" class="px-3 h-8 rounded-lg bg-red-900/60 border border-red-700 text-red-200 hover:text-white text-xs">Delete node</button>
+        </template>
+      </div>
+
+      <!-- issues -->
+      <template x-if="issues.length">
+        <div class="absolute top-3 left-3 right-3 z-10 max-h-32 overflow-y-auto custom-scrollbar bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 space-y-0.5">
+          <template x-for="iss in issues" :key="iss.message">
+            <p class="text-[11px] text-amber-300" x-text="`${iss.node_id ? iss.node_id + ': ' : ''}${iss.message}`"></p>
+          </template>
+        </div>
+      </template>
+      <template x-if="runError">
+        <div class="absolute top-3 left-3 right-3 z-10 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+          <p class="text-[11px] text-red-300 font-mono" x-text="runError"></p>
+        </div>
+      </template>
+    </main>
+
+    <!-- Inspector -->
+    <aside class="w-56 lg:w-64 shrink-0 border-l border-gray-800 bg-gray-950 flex flex-col overflow-y-auto custom-scrollbar">
+      <div class="p-3 space-y-3">
+        <template x-if="!selectedSpec">
+          <p class="text-xs text-gray-600">Select a node to edit its parameters.</p>
+        </template>
+        <template x-if="selectedSpec">
+          <div class="space-y-3">
+            <div>
+              <p class="text-xs font-mono text-gray-200" x-text="selectedSpec.name"></p>
+              <p class="text-[10px] text-gray-500 mt-0.5" x-text="selectedSpec.doc"></p>
+            </div>
+            <template x-if="!(selectedSpec.params || []).length">
+              <p class="text-[11px] text-gray-600">No parameters.</p>
+            </template>
+            <template x-for="p in (selectedSpec.params || [])" :key="p.name">
+              <div>
+                <label class="text-[11px] text-gray-400 flex items-center justify-between">
+                  <span x-text="p.name"></span>
+                  <span class="text-gray-600" x-text="p.kind"></span>
+                </label>
+                <template x-if="p.kind === 'bool'">
+                  <input type="checkbox" :checked="paramValue(p.name)" :disabled="isPreset"
+                         @change="setParam(p.name, $event.target.checked, 'bool')"
+                         class="mt-1 w-4 h-4 accent-indigo-500" />
+                </template>
+                <template x-if="p.kind === 'choice'">
+                  <select :value="paramValue(p.name)" :disabled="isPreset"
+                          @change="setParam(p.name, $event.target.value, 'choice')"
+                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                    <template x-for="c in (p.choices || [])" :key="c">
+                      <option :value="c" x-text="c"></option>
+                    </template>
+                  </select>
+                </template>
+                <template x-if="p.kind === 'int' || p.kind === 'float'">
+                  <input type="number" :value="paramValue(p.name)" :disabled="isPreset"
+                         :min="p.min" :max="p.max" :step="p.kind === 'int' ? 1 : 'any'"
+                         @input="setParam(p.name, $event.target.value, p.kind)"
+                         class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60" />
+                </template>
+                <p x-show="p.doc" class="text-[10px] text-gray-600 mt-0.5" x-text="p.doc"></p>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- node previews from the last run -->
+        <template x-if="Object.keys(nodePreviews).length">
+          <div class="pt-3 border-t border-gray-800">
+            <p class="text-[10px] uppercase tracking-wide text-gray-500 mb-2">Last run</p>
+            <div class="grid grid-cols-2 gap-2">
+              <template x-for="[nid, url] in Object.entries(nodePreviews)" :key="nid">
+                <div>
+                  <img :src="url" :alt="nid" class="w-full h-14 object-cover rounded border border-gray-700" />
+                  <p class="text-[9px] text-gray-500 truncate text-center mt-0.5" x-text="nid"></p>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </aside>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>window.PIPELINE_ID = {{ pipeline_id|tojson }};</script>
+<script src="{{ url_for('static', filename='js/pipelineEditor.js') }}"></script>
+{% endblock %}

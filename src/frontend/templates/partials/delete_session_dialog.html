@@ -1,0 +1,80 @@
+<!-- Delete Session Dialog — type-to-confirm. Included inside the
+     sessionManager() Alpine scope so performDelete() is reachable. -->
+<div
+  x-data="{
+    confirmInput: '',
+    copied: false,
+    deleting: false,
+    get targetId() { return $store.deleteDialog.sessionId || ''; },
+    copyId() {
+      copyTextToClipboard(this.targetId).then((ok) => {
+        if (!ok) return;
+        this.copied = true;
+        setTimeout(() => { this.copied = false; }, 2000);
+      });
+    },
+    async confirmDelete() {
+      if (this.confirmInput.trim() !== this.targetId || this.deleting) return;
+      this.deleting = true;
+      try {
+        await performDelete(this.targetId);
+        $store.deleteDialog.close();
+      } finally {
+        this.deleting = false;
+        this.confirmInput = '';
+      }
+    },
+  }"
+  x-effect="if (!$store.deleteDialog.isOpen) { confirmInput = ''; copied = false; }"
+  x-show="$store.deleteDialog.isOpen"
+  @keydown.escape.window="$store.deleteDialog.close()"
+  class="fixed inset-0 z-50 flex items-center justify-center p-4"
+  style="display: none;"
+  x-transition>
+
+  <div class="absolute inset-0 bg-black/70" @click="$store.deleteDialog.close()"></div>
+
+  <div class="relative bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-md max-h-[85vh] flex flex-col overflow-hidden">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800 shrink-0">
+      <h2 class="text-base font-semibold text-white">Delete Session</h2>
+      <button @click="$store.deleteDialog.close()" class="text-gray-500 hover:text-white transition-colors">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="p-6 space-y-4 overflow-y-auto custom-scrollbar">
+      <div class="text-sm text-red-400 bg-red-400/10 p-3 rounded-lg border border-red-400/20">
+        This permanently deletes the session — its conversation, generated outputs, and
+        source images (unless an image is still used by another session). This cannot be undone.
+      </div>
+
+      <div>
+        <p class="text-xs text-gray-500 mb-1">Session ID</p>
+        <div class="flex gap-2">
+          <code class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-200 font-mono truncate select-all" x-text="targetId"></code>
+          <button @click="copyId()" class="btn-secondary text-xs px-3 shrink-0" x-text="copied ? 'Copied!' : 'Copy'"></button>
+        </div>
+      </div>
+
+      <div>
+        <p class="text-xs text-gray-500 mb-1">Type the session ID to confirm</p>
+        <input type="text" x-model="confirmInput"
+               @keydown.enter="confirmDelete()"
+               placeholder="Paste session ID here"
+               class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 font-mono focus:outline-none focus:border-red-500" />
+      </div>
+    </div>
+
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-800 shrink-0">
+      <button @click="$store.deleteDialog.close()" class="btn-secondary text-sm px-4 py-2">Cancel</button>
+      <button @click="confirmDelete()"
+              :disabled="confirmInput.trim() !== targetId || deleting"
+              class="btn-danger text-sm px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed">
+        <span x-show="!deleting">Delete Session</span>
+        <span x-show="deleting">Deleting...</span>
+      </button>
+    </div>
+  </div>
+</div>

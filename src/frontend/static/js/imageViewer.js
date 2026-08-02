@@ -11,7 +11,7 @@ function imageViewerSlot(slotIdx) {
     activeOutput: null,
 
     get imgData() {
-      return this.window.images && this.window.images[this.slotIdx];
+      return this.sess.images && this.sess.images[this.slotIdx];
     },
 
     get originalUrl() {

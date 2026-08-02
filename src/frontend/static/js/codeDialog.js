@@ -6,11 +6,10 @@ function codeDialogViewer() {
       const code = this.$store.codeDialog.code;
       if (!code) return;
       
-      navigator.clipboard.writeText(code).then(() => {
+      copyTextToClipboard(code).then((ok) => {
+        if (!ok) return;
         this.copied = true;
         setTimeout(() => { this.copied = false; }, 2000);
-      }).catch(err => {
-        console.error('Failed to copy code: ', err);
       });
     }
   };

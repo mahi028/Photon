@@ -156,3 +156,71 @@ pre.dracula-block code.hljs {
 .panel-resize-handle.dragging {
   background: rgba(99, 102, 241, 0.5);
 }
+
+/* ---- Drawflow pipeline editor (v3 P3) ----
+   Drawflow ships a light default theme; these overrides fit it into the
+   Photon dark palette and give ports readable type labels. */
+#drawflow {
+  background: #0b0f19;
+  background-image: radial-gradient(#1f2937 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+#drawflow .drawflow-node {
+  background: #111827;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  padding: 0;
+  min-width: 168px;
+  color: #e5e7eb;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+}
+#drawflow .drawflow-node.selected {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, .35);
+}
+#drawflow .drawflow-node .df-node-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-bottom: 1px solid #1f2937;
+  background: #0f172a;
+  border-radius: 10px 10px 0 0;
+  color: #c7d2fe;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#drawflow .drawflow-node.df-node-input-wrap .df-node-title { color: #6ee7b7; }
+#drawflow .df-node-input .df-node-title { color: #6ee7b7; }
+#drawflow .df-node-ports {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px 8px;
+}
+#drawflow .df-node-col { display: flex; flex-direction: column; gap: 4px; }
+#drawflow .df-node-col-out { align-items: flex-end; text-align: right; }
+#drawflow .df-port-label {
+  font-size: 10px;
+  color: #9ca3af;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+#drawflow .df-port-type {
+  display: block;
+  font-size: 8px;
+  color: #4b5563;
+  font-family: 'JetBrains Mono', monospace;
+}
+#drawflow .drawflow-node .input,
+#drawflow .drawflow-node .output {
+  background: #1f2937;
+  border: 2px solid #6366f1;
+  width: 11px;
+  height: 11px;
+}
+#drawflow .drawflow-node .input:hover,
+#drawflow .drawflow-node .output:hover { background: #6366f1; }
+#drawflow .connection .main-path { stroke: #6366f1; stroke-width: 2.5px; }
+#drawflow .connection .main-path:hover { stroke: #a5b4fc; }

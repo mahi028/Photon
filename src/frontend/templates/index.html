@@ -9,27 +9,27 @@
   @keydown.arrow-left.window="carouselPrev()"
   @keydown.arrow-right.window="carouselNext()"
   @keydown.escape.window="closeCarousel()"
-  class="flex flex-col h-screen overflow-hidden">
+  class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden">
 
   <!-- Top Bar -->
-  <header class="flex items-center justify-between px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
-    <div class="flex items-center gap-3">
+  <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3 min-w-0">
       <button @click="sidebarCollapsed = !sidebarCollapsed" class="text-gray-400 hover:text-white p-1 rounded transition-colors" title="Toggle Sidebar">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7"/></svg>
       </button>
       <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
       <span class="text-xs text-gray-500 hidden sm:block">AI-Powered Image Processing</span>
     </div>
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2 sm:gap-3 shrink-0">
       <!-- LLM provider / model -->
       <template x-if="llmModelSelectable">
-        <div class="flex items-center gap-2" title="OpenRouter model">
+        <div class="hidden sm:flex items-center gap-2" title="OpenRouter model">
           <span class="text-xs text-gray-500 hidden md:block">Model</span>
           <select
             :value="llmModel"
             @change="switchLlmModel($event.target.value)"
             :disabled="llmModelSwitching || llmModels.length === 0"
-            class="bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 px-2 py-1.5 max-w-[260px] focus:outline-none focus:border-indigo-500 disabled:opacity-50">
+            class="bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 px-2 py-1.5 w-40 md:w-auto md:max-w-[260px] focus:outline-none focus:border-indigo-500 disabled:opacity-50">
             <template x-for="m in llmModels" :key="m">
               <option :value="m" :selected="m === llmModel" x-text="m"></option>
             </template>
@@ -41,53 +41,80 @@
         <span class="text-xs text-gray-500 hidden md:block" :title="'Provider: ' + llmProvider"
               x-text="llmProvider + ' · ' + llmModel"></span>
       </template>
-      <button
-        @click="showDownload = true"
-        class="btn-secondary text-sm flex items-center gap-2"
-        :disabled="allOutputs.length === 0"
-        title="Download outputs">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+
+      <!-- Pipelines -->
+      <a href="/pipelines" class="text-xs text-gray-400 hover:text-indigo-400 transition-colors flex items-center gap-1.5 px-2 py-1 rounded hover:bg-gray-800" title="Pipeline library & editor">
+        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h4m0 0a2 2 0 104 0 2 2 0 00-4 0zm4 0h8m-8 12h4m0 0a2 2 0 104 0 2 2 0 00-4 0zm4 0h4M4 12h12m0 0a2 2 0 104 0 2 2 0 00-4 0z"/>
         </svg>
-        Download
-        <span x-show="allOutputs.length > 0" class="bg-indigo-600 text-white text-xs px-1.5 py-0.5 rounded-full" x-text="allOutputs.length"></span>
-      </button>
-      
+        <span class="hidden md:inline">Pipelines</span>
+      </a>
+
       <!-- GitHub Link -->
-      <a href="https://github.com/mahi028/Photon" target="_blank" rel="noopener noreferrer" 
+      <a href="https://github.com/mahi028/Photon" target="_blank" rel="noopener noreferrer"
          class="text-gray-400 hover:text-white p-2 rounded-md hover:bg-gray-800 transition-colors"
          title="View on GitHub">
         <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
           <path fill-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clip-rule="evenodd" />
         </svg>
       </a>
+
+      <!-- User menu -->
+      <div class="relative" x-data="{ open: false }" @click.outside="open = false">
+        <button @click="open = !open" class="flex items-center gap-2 pl-1 pr-2 py-1 rounded-full hover:bg-gray-800 transition-colors">
+          <div class="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-semibold text-white shrink-0" x-text="(currentUser?.display_name || '?').charAt(0).toUpperCase()"></div>
+          <span class="text-xs text-gray-300 hidden md:block max-w-[100px] truncate" x-text="currentUser?.display_name || ''"></span>
+        </button>
+        <div x-show="open" x-transition class="absolute right-0 mt-2 w-44 bg-gray-900 border border-gray-800 rounded-xl shadow-2xl overflow-hidden z-50" style="display:none;">
+          <button @click="logout()" class="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+            Log out
+          </button>
+        </div>
+      </div>
     </div>
   </header>
 
   <!-- Main Layout -->
-  <div class="flex flex-1 overflow-hidden">
+  <div class="flex flex-1 overflow-hidden" x-data="sessionManager()">
 
-    <!-- Left Sidebar: Upload + Image Info -->
-    <aside 
-      class="shrink-0 flex flex-col border-r border-gray-800 bg-gray-950 overflow-y-auto custom-scrollbar relative transition-all duration-300"
+    <!-- Left Sidebar: Session List -->
+    <aside
+      class="shrink-0 flex flex-col border-r border-gray-800 bg-gray-950 overflow-y-auto custom-scrollbar relative transition-all duration-300 max-w-[85vw]"
       :style="sidebarCollapsed ? 'width: 0px; border-right-width: 0px; opacity: 0;' : `width: ${sidebarWidth}px; opacity: 1;`"
       :class="{'overflow-hidden': sidebarCollapsed}"
     >
       <div class="w-full h-full flex flex-col min-w-[240px]">
-        {% include "partials/upload_panel.html" %}
+        {% include "partials/session_sidebar.html" %}
       </div>
-      <!-- Drag handle -->
-      <div 
+      <div
         x-show="!sidebarCollapsed"
         class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-indigo-500/50 transition-colors z-10"
         @mousedown.prevent="startSidebarDrag($event)">
       </div>
     </aside>
 
-    <!-- Right: Tab bar + active window -->
-    <main class="flex-1 flex flex-col overflow-hidden">
-      {% include "partials/window_tab.html" %}
+    <!-- Right: Active session workspace -->
+    <main class="flex-1 flex flex-col overflow-hidden relative">
+      <!-- x-if remounts sessionPane on switch because hydrateActiveSession()
+           nulls activeSessionData first (Alpine has no :key outside x-for) -->
+      <template x-if="activeSessionData">
+        <div class="flex-1 min-h-0" x-data="sessionPane(activeSessionData)">
+          {% include "partials/session_pane.html" %}
+        </div>
+      </template>
+      <template x-if="!activeSessionData">
+        <div class="absolute inset-0 flex items-center justify-center bg-gray-950 text-gray-600 text-sm">
+          <div class="text-center">
+            <div class="text-4xl mb-3">🖼️</div>
+            <p x-text="loading ? 'Loading...' : 'Select a session from the sidebar, or start a New Session'"></p>
+          </div>
+        </div>
+      </template>
     </main>
+
+    <!-- Dialogs that need session context live inside this scope -->
+    {% include "partials/new_session_dialog.html" %}
+    {% include "partials/delete_session_dialog.html" %}
 
   </div>
 
@@ -101,14 +128,12 @@
   {% include "partials/share_dialog.html" %}
 
   <!-- Carousel Modal -->
-  <div x-show="carouselOpen" @click.self="closeCarousel()" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/92 p-4" x-transition style="display:none;">
+  <div x-show="carouselOpen" @click.self="closeCarousel()" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" x-transition style="display:none;">
 
-    <!-- Close -->
     <button @click="closeCarousel()" class="absolute top-4 right-4 text-white/70 hover:text-white z-20 transition-colors" title="Close (Esc)">
       <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
     </button>
 
-    <!-- Counter -->
     <template x-if="carouselSlides.length > 1">
       <div class="absolute top-4 left-1/2 -translate-x-1/2 text-xs text-white/60 select-none z-20 flex items-center gap-2">
         <span x-text="carouselIndex + 1"></span><span>/</span><span x-text="carouselSlides.length"></span>
@@ -117,7 +142,6 @@
       </div>
     </template>
 
-    <!-- Image -->
     <div class="relative flex items-center justify-center w-full h-full" style="max-width:90vw;max-height:90vh;">
       <div x-show="carouselLoading" class="absolute inset-0 flex items-center justify-center z-10">
         <span class="animate-spin w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full"></span>
@@ -134,21 +158,18 @@
       </template>
     </div>
 
-    <!-- Prev arrow -->
     <template x-if="carouselIndex > 0">
       <button @click.stop="carouselPrev()" class="absolute left-4 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors z-20">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
       </button>
     </template>
 
-    <!-- Next arrow -->
     <template x-if="carouselIndex < carouselSlides.length - 1">
       <button @click.stop="carouselNext()" class="absolute right-4 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors z-20">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
       </button>
     </template>
 
-    <!-- Dot indicators -->
     <template x-if="carouselSlides.length > 1 && carouselSlides.length <= 10">
       <div class="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-1.5 z-20">
         <template x-for="(slide, i) in carouselSlides" :key="i">
@@ -157,7 +178,6 @@
       </div>
     </template>
 
-    <!-- Code button if current slide has code -->
     <template x-if="carouselSlides[carouselIndex]?.code">
       <button
         @click.stop="$store.codeDialog.open('Source Code', carouselSlides[carouselIndex].label, carouselSlides[carouselIndex].code, 'viewer')"
@@ -172,10 +192,12 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/windowManager.js') }}"></script>
-<script src="{{ url_for('static', filename='js/uploader.js') }}"></script>
-<script src="{{ url_for('static', filename='js/chat.js') }}"></script>
-<script src="{{ url_for('static', filename='js/codeEditor.js') }}"></script>
+{% if active_session_id %}
+<script>window.ACTIVE_SESSION_ID = {{ active_session_id|tojson }};</script>
+{% endif %}
+<script src="{{ url_for('static', filename='js/sessionManager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/newSessionDialog.js') }}"></script>
+<script src="{{ url_for('static', filename='js/sessionPane.js') }}"></script>
 <script src="{{ url_for('static', filename='js/imageViewer.js') }}"></script>
 <script src="{{ url_for('static', filename='js/downloadDialog.js') }}"></script>
 <script src="{{ url_for('static', filename='js/codeDialog.js') }}"></script>
@@ -185,9 +207,7 @@
 // Root Alpine component
 function app() {
   return {
-    showDownload: false,
-    showExample: false,
-    allOutputs: [],   // populated by windowManager.js via events
+    currentUser: null,
 
     // LLM provider info / OpenRouter model selection
     llmProvider: null,
@@ -195,6 +215,23 @@ function app() {
     llmModelSelectable: false,
     llmModels: [],
     llmModelSwitching: false,
+
+    async loadCurrentUser() {
+      try {
+        const res = await fetch('/auth/me');
+        if (res.ok) this.currentUser = await res.json();
+      } catch (e) {
+        console.warn('Failed to load current user:', e);
+      }
+    },
+
+    async logout() {
+      try {
+        await fetch('/auth/logout', {method: 'POST'});
+      } finally {
+        window.location.href = '/auth/login';
+      }
+    },
 
     async loadLlmInfo() {
       try {
@@ -232,11 +269,10 @@ function app() {
         this.llmModelSwitching = false;
       }
     },
+
     sidebarWidth: 288,
-    sidebarCollapsed: false,
-    // Legacy single-image full screen (keep for backward compat)
-    fullImageSrc: null,
-    fullImageLoading: false,
+    // Start collapsed on small screens so the workspace isn't squeezed out
+    sidebarCollapsed: window.innerWidth < 1024,
 
     // Carousel modal state
     carouselOpen: false,
@@ -274,107 +310,28 @@ function app() {
       }
     },
 
-    // Download Dialog State
-    selectedDownloads: [],
-    downloadingZip: false,
-
-    addOutput(output) {
-      this.allOutputs.push(output);
-    },
-
     startSidebarDrag(e) {
       const startX = e.clientX;
       const startWidth = this.sidebarWidth;
-      
+
       const onMouseMove = (e) => {
         this.sidebarWidth = Math.max(240, Math.min(800, startWidth + (e.clientX - startX)));
       };
-      
+
       const onMouseUp = () => {
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
         document.body.style.cursor = '';
       };
-      
+
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
       document.body.style.cursor = 'col-resize';
     },
 
-    toggleAllDownloads() {
-      if (this.selectedDownloads.length === this.allOutputs.length) {
-        this.selectedDownloads = [];
-      } else {
-        this.selectedDownloads = this.allOutputs.map(o => o.image_id);
-      }
-    },
-
-    async downloadZip() {
-      if (this.selectedDownloads.length === 0 || this.downloadingZip) return;
-      this.downloadingZip = true;
-
-      try {
-        const res = await fetch('/api/download', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({image_ids: this.selectedDownloads}),
-        });
-
-        if (!res.ok) {
-          const data = await res.json();
-          alert(`Download failed: ${data.error || 'Unknown error'}`);
-          return;
-        }
-
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'feature_explorer_outputs.zip';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        this.showDownload = false;
-        this.selectedDownloads = [];
-      } catch (e) {
-        alert(`Download error: ${e.message}`);
-      } finally {
-        this.downloadingZip = false;
-      }
-    },
-
     async init() {
       this.loadLlmInfo();
-      // Listen for new outputs from any window (real-time)
-      window.addEventListener('fe:new-output', (e) => {
-        // Avoid duplicates if output was already hydrated from server
-        if (!this.allOutputs.find(o => o.image_id === e.detail.image_id)) {
-          this.allOutputs.push(e.detail);
-        }
-      });
-
-      // Hydrate allOutputs from the server on load so Download works after refresh
-      try {
-        const winRes = await fetch('/api/windows');
-        if (winRes.ok) {
-          const windows = await winRes.json();
-          for (const win of windows) {
-            const outRes = await fetch(`/api/windows/${win.window_id}/outputs`);
-            if (outRes.ok) {
-              const outputs = await outRes.json();
-              for (const out of outputs) {
-                if (!this.allOutputs.find(o => o.image_id === out.image_id)) {
-                  this.allOutputs.push(out);
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.error('Failed to hydrate outputs:', e);
-      }
+      this.loadCurrentUser();
     }
   };
 }
@@ -401,12 +358,42 @@ document.addEventListener('alpine:init', () => {
 
   Alpine.store('shareDialog', {
     isOpen: false,
-    windowId: null,
-    open(windowId) {
-      this.windowId = windowId;
+    sessionId: null,
+    open(sessionId) {
+      this.sessionId = sessionId;
       this.isOpen = true;
-      // Tell component to fetch token
-      window.dispatchEvent(new CustomEvent('fe:share-opened', { detail: windowId }));
+      window.dispatchEvent(new CustomEvent('fe:share-opened', { detail: sessionId }));
+    },
+    close() {
+      this.isOpen = false;
+    }
+  });
+
+  Alpine.store('downloadDialog', {
+    isOpen: false,
+    sessionId: null,
+    open(sessionId) {
+      this.sessionId = sessionId;
+      this.isOpen = true;
+      window.dispatchEvent(new CustomEvent('fe:download-opened', { detail: sessionId }));
+    },
+    close() {
+      this.isOpen = false;
+    }
+  });
+
+  Alpine.store('newSessionDialog', {
+    isOpen: false,
+    open() { this.isOpen = true; },
+    close() { this.isOpen = false; }
+  });
+
+  Alpine.store('deleteDialog', {
+    isOpen: false,
+    sessionId: null,
+    open(sessionId) {
+      this.sessionId = sessionId;
+      this.isOpen = true;
     },
     close() {
       this.isOpen = false;

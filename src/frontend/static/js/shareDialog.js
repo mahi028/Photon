@@ -1,36 +1,43 @@
+/**
+ * shareDialog.js — Alpine.js component for the share-as-clone dialog (D-019).
+ *
+ * Opening the generated link does NOT grant access to this session — it
+ * deep-clones it into the visitor's own account. User picks one-time or
+ * reusable before generating a link.
+ */
+
 function shareDialog() {
   return {
     loading: false,
     error: null,
     shareUrl: '',
+    reusable: false,
     copied: false,
-    
+
     init() {
-      window.addEventListener('fe:share-opened', (e) => {
-        this.fetchToken(e.detail);
+      window.addEventListener('fe:share-opened', () => {
+        this.shareUrl = '';
+        this.error = null;
+        this.reusable = false;
+        this.copied = false;
       });
     },
 
-    async fetchToken(windowId) {
-      if (!windowId) return;
+    async createLink() {
+      const sessionId = this.$store.shareDialog.sessionId;
+      if (!sessionId) return;
       this.loading = true;
       this.error = null;
-      this.shareUrl = '';
-      this.copied = false;
 
       try {
-        const res = await fetch(`/api/windows/${windowId}/share`, {
-          method: 'POST'
+        const res = await fetch(`/api/sessions/${sessionId}/share`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({reusable: this.reusable}),
         });
         const data = await res.json();
-        
-        if (!res.ok) {
-          throw new Error(data.error || 'Failed to share window');
-        }
-        
-        // build full URL
-        const fullUrl = window.location.origin + data.url;
-        this.shareUrl = fullUrl;
+        if (!res.ok) throw new Error(data.error || 'Failed to create share link');
+        this.shareUrl = window.location.origin + data.url;
       } catch (err) {
         this.error = err.message;
       } finally {
@@ -38,33 +45,28 @@ function shareDialog() {
       }
     },
 
-    async unshare() {
-      const windowId = this.$store.shareDialog.windowId;
-      if (!windowId) return;
-      
+    async revokeAll() {
+      const sessionId = this.$store.shareDialog.sessionId;
+      if (!sessionId) return;
       this.loading = true;
       try {
-        const res = await fetch(`/api/windows/${windowId}/share`, {
-          method: 'DELETE'
-        });
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || 'Failed to unshare');
-        }
-        this.$store.shareDialog.close();
+        const res = await fetch(`/api/sessions/${sessionId}/share`, {method: 'DELETE'});
+        if (!res.ok) throw new Error((await res.json()).error || 'Failed to revoke');
+        this.shareUrl = '';
       } catch (err) {
         this.error = err.message;
       } finally {
         this.loading = false;
       }
     },
-    
+
     copyLink() {
       if (!this.shareUrl) return;
-      navigator.clipboard.writeText(this.shareUrl).then(() => {
+      copyTextToClipboard(this.shareUrl).then((ok) => {
+        if (!ok) return;
         this.copied = true;
         setTimeout(() => { this.copied = false; }, 2000);
       });
-    }
+    },
   };
 }

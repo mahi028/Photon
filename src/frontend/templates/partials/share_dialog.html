@@ -1,4 +1,4 @@
-<!-- Share Link Dialog -->
+<!-- Share-as-Clone Dialog (D-019) -->
 <div
   x-data="shareDialog()"
   x-show="$store.shareDialog.isOpen"
@@ -7,13 +7,11 @@
   style="display: none;"
   x-transition>
 
-  <!-- Backdrop -->
   <div class="absolute inset-0 bg-black/70" @click="$store.shareDialog.close()"></div>
 
-  <!-- Dialog -->
-  <div class="relative bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-md flex flex-col overflow-hidden">
+  <div class="relative bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-md max-h-[85vh] flex flex-col overflow-hidden">
     <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800 shrink-0">
-      <h2 class="text-base font-semibold text-white">Share Link</h2>
+      <h2 class="text-base font-semibold text-white">Share Session</h2>
       <button @click="$store.shareDialog.close()" class="text-gray-500 hover:text-white transition-colors">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
@@ -21,31 +19,44 @@
       </button>
     </div>
 
-    <div class="p-6 space-y-4">
-      <template x-if="loading">
-        <div class="flex justify-center p-4">
-          <div class="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+    <div class="p-6 space-y-4 overflow-y-auto custom-scrollbar">
+      <p class="text-sm text-gray-400">Opening the link creates an independent <span class="font-medium text-gray-200">copy</span> of this session in the recipient's account — they get their own images and outputs, and cannot edit yours.</p>
+
+      <template x-if="!shareUrl">
+        <div class="space-y-4">
+          <div class="flex bg-gray-800 rounded-lg p-1 text-sm font-medium">
+            <button type="button" @click="reusable = false"
+                    :class="!reusable ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'"
+                    class="flex-1 py-1.5 rounded-md transition-colors">One-time</button>
+            <button type="button" @click="reusable = true"
+                    :class="reusable ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'"
+                    class="flex-1 py-1.5 rounded-md transition-colors">Reusable</button>
+          </div>
+          <p class="text-xs text-gray-500" x-text="reusable ? 'Anyone with the link can open it any number of times — each open creates a separate clone.' : 'The link works once. After it\'s opened, it stops working.'"></p>
+
+          <template x-if="error">
+            <div class="text-sm text-red-400 bg-red-400/10 p-3 rounded-lg border border-red-400/20" x-text="error"></div>
+          </template>
+
+          <button @click="createLink()" :disabled="loading" class="btn-primary w-full py-2 disabled:opacity-50">
+            <span x-show="!loading">Generate Link</span>
+            <span x-show="loading">Generating...</span>
+          </button>
         </div>
       </template>
-      
-      <template x-if="!loading && error">
-        <div class="text-sm text-red-400 bg-red-400/10 p-3 rounded-lg border border-red-400/20" x-text="error"></div>
-      </template>
 
-      <template x-if="!loading && shareUrl">
+      <template x-if="shareUrl">
         <div class="space-y-4">
-          <p class="text-sm text-gray-400">Anyone with this link can interact with this window. <span class="font-medium text-amber-500">Links are fully interactive.</span></p>
-          
           <div class="flex gap-2">
             <input type="text" readonly x-model="shareUrl" class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
             <button @click="copyLink()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2">
               <span x-text="copied ? 'Copied!' : 'Copy'"></span>
             </button>
           </div>
-          
+
           <div class="flex justify-end pt-2">
-            <button @click="unshare()" class="text-sm text-red-400 hover:text-red-300 transition-colors font-medium">
-              Revoke Link (Unshare)
+            <button @click="revokeAll()" class="text-sm text-red-400 hover:text-red-300 transition-colors font-medium">
+              Revoke All Links
             </button>
           </div>
         </div>

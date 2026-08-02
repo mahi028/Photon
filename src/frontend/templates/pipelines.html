@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}Pipelines — Photon{% endblock %}
+
+{% block content %}
+<div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden" x-data="pipelineLibrary()">
+
+  <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/" class="text-gray-400 hover:text-white p-1 rounded transition-colors" title="Back to sessions">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      </a>
+      <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
+      <span class="text-sm font-semibold text-gray-200">Pipelines</span>
+    </div>
+    <button @click="createBlank()" class="btn-primary text-sm px-4 py-2 flex items-center gap-2 shrink-0">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+      New Pipeline
+    </button>
+  </header>
+
+  <main class="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
+    <template x-if="loading">
+      <div class="flex justify-center py-12">
+        <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    </template>
+
+    <!-- Your pipelines -->
+    <section class="mb-8">
+      <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Your Pipelines</h2>
+      <template x-if="!loading && mine.length === 0">
+        <p class="text-sm text-gray-600">None yet — start from a preset below, or create a blank one.</p>
+      </template>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <template x-for="p in mine" :key="p.pipeline_id">
+          <div class="panel flex flex-col gap-2 hover:border-gray-700 transition-colors">
+            <div class="flex items-start justify-between gap-2">
+              <a :href="`/pipelines/${p.pipeline_id}`" class="text-sm font-medium text-gray-100 hover:text-indigo-400 truncate" x-text="p.title"></a>
+              <button @click="remove(p)" class="text-gray-600 hover:text-red-400 shrink-0" title="Delete pipeline">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <p class="text-xs text-gray-500 line-clamp-2" x-text="p.description || 'No description'"></p>
+            <p class="text-[11px] text-gray-600" x-text="`${(p.graph.nodes || []).length} nodes`"></p>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <!-- Presets -->
+    <section>
+      <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Presets <span class="text-gray-600 normal-case font-normal">— read-only, clone to edit</span></h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <template x-for="p in presets" :key="p.pipeline_id">
+          <div class="panel flex flex-col gap-2 hover:border-gray-700 transition-colors">
+            <div class="flex items-start justify-between gap-2">
+              <a :href="`/pipelines/${p.pipeline_id}`" class="text-sm font-medium text-gray-100 hover:text-indigo-400 truncate" x-text="p.title"></a>
+              <span class="badge-llm shrink-0">preset</span>
+            </div>
+            <p class="text-xs text-gray-500 line-clamp-3" x-text="p.description"></p>
+            <div class="flex items-center justify-between pt-1">
+              <span class="text-[11px] text-gray-600" x-text="`${(p.graph.nodes || []).length} nodes`"></span>
+              <button @click="clone(p)" :disabled="cloning" class="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50">Clone</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function pipelineLibrary() {
+  return {
+    all: [],
+    loading: true,
+    cloning: false,
+
+    get mine() { return this.all.filter(p => !p.is_preset); },
+    get presets() { return this.all.filter(p => p.is_preset); },
+
+    async load() {
+      this.loading = true;
+      try {
+        const res = await fetch('/api/pipelines');
+        if (res.ok) this.all = await res.json();
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async createBlank() {
+      const title = prompt('Pipeline name:', 'My pipeline');
+      if (!title) return;
+      const res = await fetch('/api/pipelines', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title, graph: {nodes: [], edges: []}}),
+      });
+      const data = await res.json();
+      if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
+      else alert(data.error || 'Create failed');
+    },
+
+    async clone(p) {
+      this.cloning = true;
+      try {
+        const res = await fetch('/api/pipelines', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({clone_from: p.pipeline_id}),
+        });
+        const data = await res.json();
+        if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
+        else alert(data.error || 'Clone failed');
+      } finally {
+        this.cloning = false;
+      }
+    },
+
+    async remove(p) {
+      if (!confirm(`Delete pipeline "${p.title}"?`)) return;
+      const res = await fetch(`/api/pipelines/${p.pipeline_id}`, {method: 'DELETE'});
+      if (res.ok) this.all = this.all.filter(x => x.pipeline_id !== p.pipeline_id);
+      else alert('Delete failed');
+    },
+
+    init() { this.load(); },
+  };
+}
+</script>
+{% endblock %}

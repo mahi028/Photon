@@ -53,6 +53,7 @@ class Message:
     execution_result: ExecutionResult | None = None # populated only if was_executed
     internal: bool = False            # loop-internal turn (execution feedback / contract-violation
                                       # feedback) — part of the LLM context, hidden in the chat UI
+    pipeline: dict[str, Any] | None = None   # graph JSON when response_type == "pipeline" (v3)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +65,7 @@ class Message:
             "execution_result": self.execution_result.to_dict() if self.execution_result else None,
             "turn_index": self.turn_index,
             "internal": self.internal,
+            "pipeline": self.pipeline,
         }
 
 
@@ -72,7 +74,7 @@ class GeneratedImage:
     """An output image produced by the sandbox (from LLM or manual run)."""
 
     image_id: str
-    window_id: str
+    session_id: str
     description: str
     path: str                   # full-res output path
     preview_path: str
@@ -84,7 +86,7 @@ class GeneratedImage:
     def to_dict(self) -> dict[str, Any]:
         return {
             "image_id": self.image_id,
-            "window_id": self.window_id,
+            "session_id": self.session_id,
             "description": self.description,
             "path": self.path,
             "preview_path": self.preview_path,
@@ -96,28 +98,32 @@ class GeneratedImage:
 
 
 @dataclass
-class Window:
-    """A single tab — either an LLM chat session or a self-programming pad."""
+class Session:
+    """A unified session — LLM chat AND self-programming editor, toggled in the
+    UI, sharing the same images/outputs/history. Replaces the old mode-locked
+    Window (see DECISIONS D-018)."""
 
-    window_id: str
-    mode: str                               # "llm" | "manual"
+    session_id: str
+    user_id: str
     created_at: datetime
-    image_id: str                           # primary image (images[0])
-    image_ids: list[str] = field(default_factory=list)  # all images in batch
+    updated_at: datetime
+    title: str = "Untitled"
+    image_ids: list[str] = field(default_factory=list)  # all attached images
     llm_conversation: list[Message] = field(default_factory=list)
-    current_code: str | None = None         # manual mode editor content
+    current_code: str | None = None         # manual editor content
     outputs: list[GeneratedImage] = field(default_factory=list)
     status: str = "idle"                    # "idle" | "running" | "error"
-    share_token: str | None = None
-    is_shared: bool = False
-    _run_count: int = 0                     # manual mode run counter
+    _run_count: int = 0                     # manual-run counter
 
-    def __post_init__(self):
-        # Ensure image_ids always contains at least the primary image
-        if not self.image_ids:
-            self.image_ids = [self.image_id]
-        elif self.image_id not in self.image_ids:
-            self.image_ids.insert(0, self.image_id)
+    # Sharing is NOT a field on Session — share links live in the separate
+    # `share_links` table (token, session_id, reusable, used_count), since a
+    # session can have multiple links over time and sharing now means
+    # deep-clone-on-open, not a flag on the session itself (see D-019).
+
+    @property
+    def image_id(self) -> str | None:
+        """Primary (first-attached) image — convenience accessor."""
+        return self.image_ids[0] if self.image_ids else None
 
     def next_run_number(self) -> int:
         self._run_count += 1
@@ -125,14 +131,14 @@ class Window:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "window_id": self.window_id,
-            "mode": self.mode,
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "title": self.title,
             "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
             "image_id": self.image_id,
             "image_ids": self.image_ids,
             "status": self.status,
-            "share_token": self.share_token,
-            "is_shared": self.is_shared,
             "output_count": len(self.outputs),
         }
 

@@ -62,38 +62,10 @@ _BLOCKED_BUILTINS: frozenset[str] = frozenset(
     {"eval", "exec", "__import__", "compile", "open", "breakpoint"}
 )
 
-# Allowed top-level module names (whitelist — anything else is blocked)
-_ALLOWED_IMPORT_TOPS: frozenset[str] = frozenset(
-    {
-        "numpy",
-        "np",
-        "PIL",
-        "cv2",
-        "scipy",
-        "skimage",
-        "tifffile",
-        "os",
-        "pathlib",
-        "math",
-        "json",
-        "re",
-        "struct",
-        "io",
-        "typing",
-        "dataclasses",
-        "functools",
-        "itertools",
-        "collections",
-        "copy",
-        "warnings",
-        "traceback",
-        "time",
-        "datetime",
-        "enum",
-        "abc",
-        "contextlib",
-    }
-)
+# Allowed top-level module names (whitelist — anything else is blocked).
+# Auto-synced from pyproject.toml at config import time (dep_sync.py) — add a
+# library via `uv add xyz` + restart, not by editing this set.
+_ALLOWED_IMPORT_TOPS: frozenset[str] = config.SANDBOX_ALLOWED_IMPORTS
 
 
 class ASTSecurityError(Exception):

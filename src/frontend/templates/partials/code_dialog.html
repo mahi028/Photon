@@ -3,7 +3,7 @@
   x-data="codeDialogViewer()"
   x-show="$store.codeDialog.isOpen"
   @keydown.escape.window="$store.codeDialog.close()"
-  class="fixed inset-0 z-50 flex items-center justify-center p-4"
+  class="fixed inset-0 z-[70] flex items-center justify-center p-4"
   style="display: none;"
   x-transition>
 
@@ -48,7 +48,7 @@
         </div>
       </template>
 
-      <div class="relative w-full h-full min-h-[300px]">
+      <div class="relative w-full min-h-[300px]">
         <div class="absolute top-2 right-4 z-10">
           <button
             @click="copyCode()"
@@ -61,7 +61,7 @@
         </div>
         
         <!-- Readonly Dracula-highlighted code block (highlight.js via x-highlight directive) -->
-        <pre class="dracula-block w-full h-full p-6 text-sm"><code x-highlight="$store.codeDialog.code"></code></pre>
+        <pre class="dracula-block w-full min-h-[300px] p-4 sm:p-6 text-xs sm:text-sm"><code x-highlight="$store.codeDialog.code"></code></pre>
       </div>
     </div>
   </div>

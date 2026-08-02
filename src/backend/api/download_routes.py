@@ -1,4 +1,6 @@
-"""Download route: POST /api/download — zip of selected full-res output images."""
+"""Download route: POST /api/sessions/<session_id>/download — zip of a single
+session's output images (D-020, session-scoped download).
+"""
 
 from __future__ import annotations
 
@@ -8,43 +10,39 @@ from pathlib import Path
 
 from flask import Blueprint, request, jsonify, send_file
 
+from ..core.auth.middleware import login_required, get_current_user_id
 from ..core.session.manager import get_manager
 
 download_bp = Blueprint("download", __name__)
 
 
-@download_bp.route("/download", methods=["POST"])
-def download_zip():
-    """Download a zip of selected full-res output images.
+@download_bp.route("/sessions/<session_id>/download", methods=["POST"])
+@login_required
+def download_zip(session_id: str):
+    """Download a zip of selected full-res output images from ONE session. Owner only.
 
-    Request: {"image_ids": ["uuid", ...]}
+    Request: {"image_ids": ["uuid", ...]}  (omit or empty → all of this session's outputs)
     Response: application/zip streamed binary.
     """
-    data = request.get_json(force=True)
-    image_ids_requested = set(data.get("image_ids", []))
+    sess = get_manager().get_session_for_user(session_id, get_current_user_id())
+    if not sess:
+        return jsonify({"error": "Session not found"}), 404
 
-    if not image_ids_requested:
-        return jsonify({"error": "image_ids list is empty"}), 400
+    data = request.get_json(silent=True) or {}
+    requested = set(data.get("image_ids") or [])
 
-    # Collect all GeneratedImages across all windows
-    # list_windows() returns summaries (dicts), so we must hydrate each one
-    all_outputs = {}
-    manager = get_manager()
-    for summary in manager.list_windows():
-        window = manager.get_window(summary["window_id"])
-        if not window:
-            continue
-        for output in window.outputs:
-            all_outputs[output.image_id] = output
+    outputs_by_id = {o.image_id: o for o in sess.outputs}
+    image_ids = requested & outputs_by_id.keys() if requested else set(outputs_by_id.keys())
+
+    if not image_ids:
+        return jsonify({"error": "No matching outputs in this session"}), 404
 
     zip_buffer = io.BytesIO()
     found_any = False
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for image_id in image_ids_requested:
-            output = all_outputs.get(image_id)
-            if not output:
-                continue
+        for image_id in image_ids:
+            output = outputs_by_id[image_id]
             path = Path(output.path)
             if not path.is_file():
                 continue
@@ -53,12 +51,12 @@ def download_zip():
             found_any = True
 
     if not found_any:
-        return jsonify({"error": "No matching files found for the given image_ids"}), 404
+        return jsonify({"error": "No matching files found on disk for the given image_ids"}), 404
 
     zip_buffer.seek(0)
     return send_file(
         zip_buffer,
         mimetype="application/zip",
         as_attachment=True,
-        download_name="feature_explorer_outputs.zip",
+        download_name=f"session_{session_id[:8]}_outputs.zip",
     )

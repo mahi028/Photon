@@ -1,4 +1,8 @@
-"""Manual window run route: POST /api/windows/<window_id>/run-code."""
+"""Manual run route: POST /api/sessions/<session_id>/run-code.
+
+A session no longer has a locked "mode" (see DECISIONS D-018) — any session
+can run manual code, independent of whether it's also had LLM chat turns.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 
 from ..config import config
+from ..core.auth.middleware import login_required, get_current_user_id
 from ..core.sandbox.subprocess_executor import SubprocessExecutor
 from ..core.image.thumbnail import generate_thumbnail
 from ..core.session.manager import get_manager
@@ -20,47 +25,46 @@ manual_bp = Blueprint("manual", __name__)
 _executor = SubprocessExecutor()
 
 
-@manual_bp.route("/windows/<window_id>/run-code", methods=["POST"])
-def run_code(window_id: str):
-    """Execute user-submitted code in the sandbox (manual mode only).
+@manual_bp.route("/sessions/<session_id>/run-code", methods=["POST"])
+@login_required
+def run_code(session_id: str):
+    """Execute user-submitted code in the sandbox. Owner only.
 
     Single execution — no LLM, no retry loop.
     """
     manager = get_manager()
-    window = manager.get_window(window_id)
-    if not window:
-        return jsonify({"error": "Window not found"}), 404
-    if window.mode not in ("manual", "llm"):
-        return jsonify({"error": "Invalid window mode"}), 400
-    if window.status == "running":
-        return jsonify({"error": "Window is already running"}), 409
+    sess = manager.get_session_for_user(session_id, get_current_user_id())
+    if not sess:
+        return jsonify({"error": "Session not found"}), 404
+    if sess.status == "running":
+        return jsonify({"error": "Session is already running"}), 409
 
     data = request.get_json(force=True)
     code = data.get("code", "")
     if not code.strip():
         return jsonify({"error": "No code provided"}), 400
 
-    # Persist code in window (only applies to manual mode)
-    manager.save_manual_code(window_id, code)
-    manager.set_status(window_id, "running")
+    # Persist code on the session (survives switching to chat mode and back)
+    manager.save_manual_code(session_id, code)
+    manager.set_status(session_id, "running")
 
-    run_num = window.next_run_number()
-    
+    run_num = sess.next_run_number()
+
     image_registry = get_image_registry()
-    
+
     first_result = None
     all_success = True
 
-    for slot_idx, img_id in enumerate(window.image_ids):
+    for slot_idx, img_id in enumerate(sess.image_ids):
         metadata = image_registry.get(img_id)
         if not metadata:
             continue
-            
+
         input_path = metadata.path
 
         # Unique dir per run + per slot — user code often saves a fixed filename,
         # so a shared dir makes slots/runs overwrite each other's outputs.
-        slot_output_dir = config.OUTPUTS_DIR / window_id / f"run{run_num}" / f"slot{slot_idx}"
+        slot_output_dir = config.OUTPUTS_DIR / session_id / f"run{run_num}" / f"slot{slot_idx}"
         slot_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Execute
@@ -70,10 +74,10 @@ def run_code(window_id: str):
             output_dir=str(slot_output_dir),
             timeout=config.EXECUTION_TIMEOUT_SECONDS,
         )
-        
+
         if slot_idx == 0:
             first_result = result
-            
+
         if result.file_exists and result.output_path:
             # Generate preview for the output
             out_path = Path(result.output_path)
@@ -95,7 +99,7 @@ def run_code(window_id: str):
 
             gen_image = GeneratedImage(
                 image_id=output_image_id,
-                window_id=window_id,
+                session_id=session_id,
                 description=description,
                 path=str(out_path),
                 preview_path=str(preview_path) if preview_path.exists() else "",
@@ -104,11 +108,11 @@ def run_code(window_id: str):
                 produced_at=datetime.utcnow(),
                 source_iteration=run_num,
             )
-            manager.add_output(window_id, gen_image)
+            manager.add_output(session_id, gen_image)
         else:
             all_success = False
 
-    manager.set_status(window_id, "idle")
+    manager.set_status(session_id, "idle")
 
     if not first_result:
         return jsonify({"error": "No images processed"}), 400

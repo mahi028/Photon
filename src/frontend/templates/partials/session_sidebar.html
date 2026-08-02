@@ -1,0 +1,32 @@
+<!-- Session Sidebar — collapsible, ChatGPT-style (D-021). Replaces window_tab.html. -->
+<div class="flex flex-col h-full">
+
+  <div class="p-3 shrink-0">
+    <button @click="$store.newSessionDialog.open()" class="btn-primary w-full text-sm flex items-center justify-center gap-2 py-2">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+      New Session
+    </button>
+  </div>
+
+  <div class="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2 space-y-1">
+    <template x-for="s in sessions" :key="s.session_id">
+      <!-- Deletion lives in the session window's own toolbar, not here -->
+      <div @click="activateSession(s.session_id)"
+           :class="activeSessionId === s.session_id ? 'bg-gray-800 border-indigo-600/50' : 'hover:bg-gray-900 border-transparent'"
+           class="flex items-center gap-2 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors">
+        <div class="flex-1 min-w-0">
+          <p class="text-sm truncate" :class="activeSessionId === s.session_id ? 'text-white font-medium' : 'text-gray-300'" x-text="s.title"></p>
+          <p class="text-[11px] text-gray-500 flex items-center gap-1.5">
+            <span x-text="s.image_count + (s.image_count === 1 ? ' image' : ' images')"></span>
+            <span x-show="s.status === 'running'" class="text-indigo-400">· running</span>
+          </p>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="sessions.length === 0">
+      <p class="text-xs text-gray-600 px-3 py-4 text-center">No sessions yet — click "New Session" to upload an image and get started.</p>
+    </template>
+  </div>
+
+</div>
