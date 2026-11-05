@@ -205,14 +205,19 @@ def _finish(session_id: str) -> None:
 
 
 def run_pipeline_for_session(session_id: str, graph: dict, title: str,
-                             user_id: str, source_turn_index: int | None = None) -> dict:
+                             user_id: str, source_turn_index: int | None = None,
+                             emit=None) -> dict:
     """Execute a graph against every image attached to a session.
 
     Shared by POST /sessions/<id>/run-pipeline and the LLM loop's
     response_type="pipeline" path. Streams node progress over the session's
     SSE queue and persists finals as GeneratedImages (D-025 linkage kept via
     source_turn_index).
+
+    emit: optional callable(event_dict) replacing the SSE push — used by the
+    MCP server, which has no browser stream to feed.
     """
+    push = emit or (lambda ev: _push(session_id, ev))
     manager = get_manager()
     sess = manager.get_session_for_user(session_id, user_id)
     if not sess:
@@ -239,9 +244,9 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
 
             out_dir = config.OUTPUTS_DIR / session_id / f"pipe{run_id}" / f"slot{slot_idx}"
             node_dir = out_dir / "nodes"
-            _push(session_id, {"event": "pipeline_start", "image_slot": slot_idx,
-                               "image_id": image_id, "title": title,
-                               "node_count": len(graph.get("nodes") or [])})
+            push({"event": "pipeline_start", "image_slot": slot_idx,
+                  "image_id": image_id, "title": title,
+                  "node_count": len(graph.get("nodes") or [])})
 
             result = run_pipeline_subprocess(
                 graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
@@ -249,8 +254,8 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
             )
 
             for ev in result.get("events", []):
-                _push(session_id, {"event": f"node_{ev['phase']}", "node_id": ev["node_id"],
-                                   "image_slot": slot_idx, "message": ev.get("message")})
+                push({"event": f"node_{ev['phase']}", "node_id": ev["node_id"],
+                      "image_slot": slot_idx, "message": ev.get("message")})
 
             previews_rel = {}
             for nid, info in (result.get("previews") or {}).items():
@@ -260,14 +265,14 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                 except ValueError:
                     pass
             if previews_rel:
-                _push(session_id, {"event": "node_previews", "image_slot": slot_idx,
-                                   "previews": previews_rel})
+                push({"event": "node_previews", "image_slot": slot_idx,
+                      "previews": previews_rel})
 
             if result.get("error"):
                 last_error = result["error"]
-                _push(session_id, {"event": "pipeline_error", "image_slot": slot_idx,
-                                   "failed_node": result.get("failed_node"),
-                                   "message": result["error"]})
+                push({"event": "pipeline_error", "image_slot": slot_idx,
+                      "failed_node": result.get("failed_node"),
+                      "message": result["error"]})
                 continue
 
             for final in result.get("finals", []):
@@ -299,7 +304,7 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                 out_info = {"image_id": image_out_id, "description": description,
                             "preview_url": preview_url, "image_slot": slot_idx}
                 outputs_made.append(out_info)
-                _push(session_id, {"event": "output_saved", **out_info})
+                push({"event": "output_saved", **out_info})
     finally:
         manager.set_status(session_id, "idle")
 

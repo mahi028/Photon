@@ -38,6 +38,7 @@ def create_app() -> Flask:
     from .api.example_routes import example_bp
     from .api.shared_routes import shared_bp
     from .api.llm_routes import llm_bp
+    from .api.api_key_routes import api_key_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(llm_bp, url_prefix="/api")
@@ -48,6 +49,7 @@ def create_app() -> Flask:
     app.register_blueprint(manual_bp, url_prefix="/api")
     app.register_blueprint(download_bp, url_prefix="/api")
     app.register_blueprint(example_bp, url_prefix="/api")
+    app.register_blueprint(api_key_bp, url_prefix="/api")
     app.register_blueprint(shared_bp)
 
     # Serve preview images from volumes/uploads
@@ -78,6 +80,12 @@ def create_app() -> Flask:
     def session_view(session_id: str):
         from flask import render_template
         return render_template("index.html", active_session_id=session_id)
+
+    @app.route("/settings/api-keys")
+    @login_required
+    def api_keys_view():
+        from flask import render_template
+        return render_template("api_keys.html", mcp_public_url=config.MCP_PUBLIC_URL)
 
     # --- v3 pipeline editor ---
     @app.route("/pipelines")

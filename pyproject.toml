@@ -24,6 +24,11 @@ dependencies = [
     "waitress>=3.0.2",
 ]
 
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.3,<3",
+]
+
 # PyTorch must come from the CUDA 12.1 build index — the default PyPI wheels
 # don't work in this container. `explicit = true` means ONLY the packages
 # mapped below are pulled from here; everything else still resolves via PyPI.

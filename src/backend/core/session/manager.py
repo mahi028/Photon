@@ -64,8 +64,14 @@ class SessionManager:
         """Retrieve a session from cache, or hydrate from DB."""
         with self._lock:
             if session_id in self._cache:
-                self._touch(session_id)
-                return self._cache[session_id]
+                cached = self._cache[session_id]
+                # Another process (gunicorn worker, MCP server) may have written
+                # this session since we cached it; reload rather than serve — or
+                # later save_session() over — a stale copy.
+                if store.load_session_updated_at(session_id) == cached.updated_at.isoformat():
+                    self._touch(session_id)
+                    return cached
+                del self._cache[session_id]
 
             # Cache miss, load from DB
             sess = store.load_session(session_id)
@@ -73,6 +79,16 @@ class SessionManager:
                 self._cache[session_id] = sess
                 self._evict_if_needed()
             return sess
+
+    def invalidate(self, session_id: str) -> None:
+        """Drop a session from the cache so the next get re-reads SQLite.
+
+        For processes that share sessions.db with another writer (e.g. the MCP
+        server alongside the Flask app): call before reading, so changes the
+        other process wrote are picked up.
+        """
+        with self._lock:
+            self._cache.pop(session_id, None)
 
     def get_session_for_user(self, session_id: str, user_id: str) -> Optional[Session]:
         """Retrieve a session only if it's owned by user_id — the standard

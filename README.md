@@ -75,6 +75,37 @@ _Alternatively:_ `flask --app src/backend/app run --debug`
 
 Open `http://localhost:5000` in your browser.
 
+## MCP Server (use Photon from any LLM)
+
+Photon's pipeline layer is also exposed as an [MCP](https://modelcontextprotocol.io) server, so Claude Code, Claude Desktop, or any MCP client can drive it directly. The client LLM plans the work: it reads the op catalog, writes a pipeline graph, validates it, runs it, looks at the previews and iterates. Photon's own LLM loop is not used.
+
+```bash
+uv sync --extra mcp
+```
+
+**Streamable HTTP** (default `0.0.0.0:8890`; override with `--host/--port` or `PHOTON_MCP_HOST/PHOTON_MCP_PORT`). Every request needs a per-user API key:
+
+1. Log in to the web UI, open the user menu, choose **API keys**, and create a key. It is shown once.
+2. Start the server and register it with your client:
+
+```bash
+uv run --extra mcp python -m src.mcp_server --transport http
+claude mcp add --transport http photon http://<host>:8890/mcp \
+  --header "Authorization: Bearer pk_..."
+```
+
+Each call acts as the key's owner, so results appear in that user's sessions. Keys can expire (7/30/90/365 days) and can be revoked from the same page; only a SHA-256 hash is stored. If clients reach the server through a proxy or port-forward, set `PHOTON_MCP_PUBLIC_URL` (e.g. `http://172.20.23.234:10227/mcp`) so the API keys page shows the right URL in its copy-paste command.
+
+**stdio** (local, launched by the client, no key; acts as `PHOTON_MCP_USER`, a username or email, which can go in `.env`):
+
+```bash
+claude mcp add photon -- uv run --directory /path/to/Photon --extra mcp python -m src.mcp_server
+```
+
+Tools: `upload_image` (local path or URL), `create_session`, `attach_image`, `list_sessions`, `get_session`, `get_output`, `list_ops`, `validate_pipeline`, `run_pipeline`, `list_pipelines`, `get_pipeline`, `save_pipeline`. Tool results include small JPEG previews; full-resolution outputs stay in `volumes/outputs/` and are returned as paths.
+
+Scope is deliberately narrow: only trusted catalog ops (plus already-saved custom nodes) run. There is no `run_code` and no tool to save new custom nodes, since both execute arbitrary Python and the subprocess sandbox should not face prompt-injected code until the Docker executor ships. It shares `volumes/` and `sessions.db` with the web app, so both can run at once.
+
 ## The Execution Contract
 
 Whether you are using manual mode or observing the AI, Photon relies on a strict execution contract for the sandbox:

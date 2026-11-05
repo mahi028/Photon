@@ -112,6 +112,11 @@ class Config:
     GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
     GOOGLE_OAUTH_ENABLED: bool = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
+    # ---- MCP server ----
+    # Externally reachable MCP endpoint (e.g. behind a port-forward/proxy), shown
+    # on the API keys page. Empty = derived in the browser as <page host>:8890/mcp.
+    MCP_PUBLIC_URL: str = os.getenv("PHOTON_MCP_PUBLIC_URL", "")
+
     # ---- Volume paths (relative to project root) ----
     ROOT_DIR: Path = _root
     VOLUMES_DIR: Path = _root / "volumes"

@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+
+{% block title %}API Keys — Photon{% endblock %}
+
+{% block content %}
+<div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden" x-data="apiKeys()">
+
+  <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/" class="text-gray-400 hover:text-white p-1 rounded transition-colors" title="Back to sessions">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      </a>
+      <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
+      <span class="text-sm font-semibold text-gray-200">API Keys</span>
+    </div>
+  </header>
+
+  <main class="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
+    <div class="max-w-3xl mx-auto flex flex-col gap-6">
+
+      <p class="text-sm text-gray-400">
+        API keys let MCP clients (Claude Code, Claude Desktop, any MCP-capable LLM) use Photon as you.
+        Everything a key does lands in your account and shows up here in the UI. Treat a key like a password.
+      </p>
+
+      <!-- Create -->
+      <section class="panel flex flex-col gap-3">
+        <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">New key</h2>
+        <form class="flex flex-col sm:flex-row gap-2" @submit.prevent="create()">
+          <input x-model="newName" type="text" maxlength="80" required placeholder="Name, e.g. laptop Claude Code"
+                 class="flex-1 min-w-0 bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500" />
+          <select x-model="newExpiry"
+                  class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-indigo-500">
+            <option value="">Never expires</option>
+            <option value="7">7 days</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">1 year</option>
+          </select>
+          <button type="submit" class="btn-primary text-sm" :disabled="creating || !newName.trim()">Create key</button>
+        </form>
+        <p x-show="error" x-text="error" class="text-xs text-red-400" style="display:none;"></p>
+      </section>
+
+      <!-- Freshly created key: shown once -->
+      <template x-if="created">
+        <section class="panel border-indigo-700 flex flex-col gap-3">
+          <div class="flex items-start justify-between gap-2">
+            <h2 class="text-sm font-semibold text-indigo-300">Copy your key now. It won't be shown again.</h2>
+            <button @click="created = null" class="text-gray-500 hover:text-white shrink-0" title="Dismiss">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="flex gap-2 items-stretch">
+            <code class="flex-1 min-w-0 font-mono text-xs bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-green-300 break-all" x-text="created.key"></code>
+            <button @click="copy(created.key, 'key')" class="btn-secondary text-xs shrink-0" x-text="copied === 'key' ? 'Copied' : 'Copy'"></button>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <span class="text-xs text-gray-400">Add Photon to Claude Code:</span>
+            <div class="flex gap-2 items-stretch">
+              <pre class="flex-1 min-w-0 font-mono text-xs bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-gray-200 whitespace-pre-wrap break-all" x-text="snippet(created.key)"></pre>
+              <button @click="copy(snippet(created.key), 'cmd')" class="btn-secondary text-xs shrink-0 self-start" x-text="copied === 'cmd' ? 'Copied' : 'Copy'"></button>
+            </div>
+            <span class="text-[11px] text-gray-600">Other clients: send header <code class="font-mono">Authorization: Bearer &lt;key&gt;</code> to <code class="font-mono" x-text="mcpUrl"></code></span>
+          </div>
+        </section>
+      </template>
+
+      <!-- List -->
+      <section class="flex flex-col gap-3">
+        <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Your keys</h2>
+        <template x-if="loading">
+          <div class="flex justify-center py-8">
+            <div class="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+          </div>
+        </template>
+        <template x-if="!loading && keys.length === 0">
+          <p class="text-sm text-gray-600">No keys yet.</p>
+        </template>
+        <div class="flex flex-col gap-2">
+          <template x-for="k in keys" :key="k.key_id">
+            <div class="panel flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 py-3"
+                 :class="k.status !== 'active' && 'opacity-60'">
+              <div class="flex-1 min-w-0 flex flex-col gap-0.5">
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="text-sm font-medium text-gray-100 truncate" x-text="k.name"></span>
+                  <span x-show="k.status === 'active'" class="badge-manual">active</span>
+                  <span x-show="k.status === 'revoked'" class="text-xs bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">revoked</span>
+                  <span x-show="k.status === 'expired'" class="text-xs bg-amber-900 text-amber-300 px-1.5 py-0.5 rounded">expired</span>
+                </div>
+                <div class="text-[11px] text-gray-500 flex flex-wrap gap-x-3">
+                  <span class="font-mono" x-text="k.prefix + '…'"></span>
+                  <span x-text="'Created ' + fmt(k.created_at)"></span>
+                  <span x-text="k.last_used_at ? 'Last used ' + fmt(k.last_used_at) : 'Never used'"></span>
+                  <span x-text="k.expires_at ? 'Expires ' + fmt(k.expires_at) : 'No expiry'"></span>
+                </div>
+              </div>
+              <button x-show="k.status === 'active'" @click="revoke(k)" class="btn-danger text-xs self-start sm:self-center">Revoke</button>
+            </div>
+          </template>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.MCP_PUBLIC_URL = {{ mcp_public_url|tojson }};
+</script>
+<script>
+function apiKeys() {
+  return {
+    keys: [],
+    loading: true,
+    creating: false,
+    newName: '',
+    newExpiry: '',
+    created: null,
+    copied: null,
+    error: '',
+    mcpUrl: window.MCP_PUBLIC_URL || `${location.protocol}//${location.hostname}:8890/mcp`,
+
+    async load() {
+      this.loading = true;
+      try {
+        const res = await fetch('/api/keys');
+        if (res.ok) this.keys = await res.json();
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async create() {
+      this.error = '';
+      this.creating = true;
+      try {
+        const res = await fetch('/api/keys', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            name: this.newName.trim(),
+            expires_in_days: this.newExpiry ? Number(this.newExpiry) : null,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) { this.error = data.error || 'Could not create key'; return; }
+        this.created = data;
+        this.newName = '';
+        this.newExpiry = '';
+        await this.load();
+      } finally {
+        this.creating = false;
+      }
+    },
+
+    async revoke(k) {
+      if (!confirm(`Revoke "${k.name}"? Clients using it stop working immediately.`)) return;
+      const res = await fetch(`/api/keys/${k.key_id}`, {method: 'DELETE'});
+      if (res.ok) {
+        if (this.created && this.created.key_id === k.key_id) this.created = null;
+        await this.load();
+      } else {
+        alert('Revoke failed');
+      }
+    },
+
+    snippet(key) {
+      return `claude mcp add --transport http photon ${this.mcpUrl} \\\n  --header "Authorization: Bearer ${key}"`;
+    },
+
+    async copy(text, which) {
+      try {
+        await navigator.clipboard.writeText(text);
+        this.copied = which;
+        setTimeout(() => { if (this.copied === which) this.copied = null; }, 1500);
+      } catch (e) {
+        alert('Copy failed; select the text and copy manually.');
+      }
+    },
+
+    fmt(iso) {
+      // Stored as naive UTC ISO strings.
+      const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+      return d.toLocaleDateString(undefined, {year: 'numeric', month: 'short', day: 'numeric'});
+    },
+
+    init() { this.load(); },
+  };
+}
+</script>
+{% endblock %}

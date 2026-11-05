@@ -156,6 +156,23 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
             )
         """)
+        # API keys for programmatic access (MCP server). Only a SHA-256 hash of
+        # the key is stored; the plaintext is shown to the user once at creation.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                key_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                prefix TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                expires_at TEXT,
+                revoked_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id)")
         _seed_presets(conn)
 
 
@@ -321,6 +338,14 @@ def list_session_summaries(user_id: str) -> List[Dict[str, Any]]:
                 "image_count": len(image_ids),
             })
         return summaries
+
+def load_session_updated_at(session_id: str) -> Optional[str]:
+    """Cheap staleness probe for the SessionManager cache (one indexed row)."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT updated_at FROM sessions WHERE session_id = ?",
+                           (session_id,)).fetchone()
+        return row["updated_at"] if row else None
+
 
 def load_session(session_id: str) -> Optional[Session]:
     with closing(_get_conn()) as conn, conn:
@@ -586,3 +611,53 @@ def delete_custom_node(custom_node_id: str, user_id: str) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("DELETE FROM custom_nodes WHERE custom_node_id = ? AND user_id = ?",
                      (custom_node_id, user_id))
+
+
+# ---------------------------------------------------------------------------
+# API keys
+# ---------------------------------------------------------------------------
+
+def create_api_key(key_id: str, user_id: str, name: str, key_hash: str, prefix: str,
+                   created_at: str, expires_at: Optional[str]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO api_keys (key_id, user_id, name, key_hash, prefix, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (key_id, user_id, name, key_hash, prefix, created_at, expires_at))
+
+
+def list_api_keys(user_id: str) -> List[Dict[str, Any]]:
+    """A user's keys, newest first. Never includes the hash."""
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT key_id, name, prefix, created_at, last_used_at, expires_at, revoked_at
+            FROM api_keys WHERE user_id = ? ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def find_api_key_by_hash(key_hash: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT * FROM api_keys WHERE key_hash = ?", (key_hash,)).fetchone()
+        return dict(row) if row else None
+
+
+def revoke_api_key(key_id: str, user_id: str, revoked_at: str) -> bool:
+    """Owner-scoped revoke. Returns False if the key isn't the user's or is already revoked."""
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("""
+            UPDATE api_keys SET revoked_at = ?
+            WHERE key_id = ? AND user_id = ? AND revoked_at IS NULL
+        """, (revoked_at, key_id, user_id))
+        return cur.rowcount > 0
+
+
+def touch_api_key(key_id: str, used_at: str) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE api_keys SET last_used_at = ? WHERE key_id = ?", (used_at, key_id))
+
+
+def load_user(user_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
