@@ -1,0 +1,72 @@
+<!-- App-wide confirm / prompt / alert dialog + toasts (static/js/ui.js). -->
+<div x-data
+     x-show="$store.ui.dialog"
+     @keydown.escape.window="$store.ui.dialog && $store.ui.cancel()"
+     class="fixed inset-0 z-[80] flex items-center justify-center p-4"
+     style="display: none;"
+     x-transition.opacity>
+  <div class="absolute inset-0 bg-black/70" @click="$store.ui.cancel()"></div>
+
+  <template x-if="$store.ui.dialog">
+    <form class="relative bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-md max-h-[85vh] flex flex-col overflow-hidden"
+          role="dialog" aria-modal="true" :aria-label="$store.ui.dialog.title || $store.ui.dialog.label"
+          @submit.prevent="$store.ui.submit()"
+          x-init="$nextTick(() => ($refs.field || $refs.ok)?.focus())">
+      <div x-show="$store.ui.dialog.title" class="px-6 pt-5">
+        <h2 class="text-base font-semibold text-white" x-text="$store.ui.dialog.title"></h2>
+      </div>
+
+      <div class="px-6 py-4 space-y-3 overflow-y-auto custom-scrollbar">
+        <template x-if="$store.ui.dialog.message">
+          <p class="text-sm text-gray-400 whitespace-pre-wrap break-words"
+             :class="$store.ui.dialog.mono && 'font-mono text-xs bg-gray-950 border border-gray-800 rounded-lg p-3 text-gray-300'"
+             x-text="$store.ui.dialog.message"></p>
+        </template>
+
+        <template x-if="$store.ui.dialog.kind === 'prompt'">
+          <label class="block space-y-1.5">
+            <span x-show="$store.ui.dialog.label" class="text-xs text-gray-400" x-text="$store.ui.dialog.label"></span>
+            <template x-if="!$store.ui.dialog.multiline">
+              <input x-ref="field" type="text" x-model="$store.ui.dialog.value"
+                     :placeholder="$store.ui.dialog.placeholder" :maxlength="$store.ui.dialog.maxLength"
+                     @focus="$event.target.select()"
+                     class="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500" />
+            </template>
+            <template x-if="$store.ui.dialog.multiline">
+              <textarea x-ref="field" rows="3" x-model="$store.ui.dialog.value"
+                        :placeholder="$store.ui.dialog.placeholder" :maxlength="$store.ui.dialog.maxLength"
+                        @keydown.enter.meta.prevent="$store.ui.submit()" @keydown.enter.ctrl.prevent="$store.ui.submit()"
+                        class="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500 resize-y"></textarea>
+            </template>
+          </label>
+        </template>
+      </div>
+
+      <div class="flex justify-end gap-2 px-6 py-4 border-t border-gray-800 shrink-0">
+        <button type="button" x-show="$store.ui.dialog.kind !== 'alert'" @click="$store.ui.cancel()"
+                class="btn-secondary text-sm px-4 py-1.5" x-text="$store.ui.dialog.cancelText"></button>
+        <button x-ref="ok" type="submit" :disabled="!$store.ui.canSubmit"
+                :class="$store.ui.dialog.danger ? 'btn-danger px-4 py-1.5' : 'btn-primary px-4 py-1.5'"
+                class="text-sm" x-text="$store.ui.dialog.confirmText"></button>
+      </div>
+    </form>
+  </template>
+</div>
+
+<div x-data class="fixed bottom-4 right-4 left-4 sm:left-auto z-[90] flex flex-col items-end gap-2 pointer-events-none" aria-live="polite">
+  <template x-for="t in $store.ui.toasts" :key="t.id">
+    <div x-transition.opacity
+         class="pointer-events-auto max-w-sm w-full sm:w-auto flex items-start gap-3 rounded-lg border px-4 py-2.5 shadow-xl text-sm"
+         :class="{
+           'bg-red-950/95 border-red-800 text-red-200': t.kind === 'error',
+           'bg-emerald-950/95 border-emerald-800 text-emerald-200': t.kind === 'success',
+           'bg-gray-900/95 border-gray-700 text-gray-200': t.kind === 'info',
+         }"
+         :role="t.kind === 'error' ? 'alert' : 'status'">
+      <span class="flex-1 break-words whitespace-pre-wrap" x-text="t.message"></span>
+      <button @click="$store.ui.dismiss(t.id)" class="opacity-60 hover:opacity-100 shrink-0" title="Dismiss">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+  </template>
+</div>

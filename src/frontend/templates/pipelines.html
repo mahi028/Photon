@@ -143,7 +143,7 @@ function pipelineLibrary() {
     },
 
     async createBlank() {
-      const title = prompt('Pipeline name:', 'My pipeline');
+      const title = await window.ui.prompt({title: 'New pipeline', label: 'Name', value: 'My pipeline', confirmText: 'Create', required: true, maxLength: 120});
       if (!title) return;
       const res = await fetch('/api/pipelines', {
         method: 'POST',
@@ -152,7 +152,7 @@ function pipelineLibrary() {
       });
       const data = await res.json();
       if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-      else alert(data.error || 'Create failed');
+      else window.ui.toast(data.error || 'Create failed', 'error');
     },
 
     async clone(p) {
@@ -165,16 +165,17 @@ function pipelineLibrary() {
         });
         const data = await res.json();
         if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-        else alert(data.error || 'Clone failed');
+        else window.ui.toast(data.error || 'Clone failed', 'error');
       } finally {
         this.cloning = false;
       }
     },
 
     async unpublish(p) {
-      if (!confirm(`Unpublish "${p.title}"? Others can no longer see or run it.`)) return;
+      if (!(await window.ui.confirm({title: 'Unpublish pipeline?', message: `Colleagues can no longer see or run "${p.title}". Its versions are kept, and publishing again restores it.`, confirmText: 'Unpublish', danger: true}))) return;
       const res = await fetch(`/api/published/${p.published_id}/unpublish`, {method: 'POST'});
-      if (res.ok) await this.load(); else alert('Unpublish failed');
+      if (res.ok) { await this.load(); window.ui.toast(`Unpublished "${p.title}".`, 'success'); }
+      else window.ui.toast('Unpublish failed', 'error');
     },
 
     async fork(p) {
@@ -187,7 +188,7 @@ function pipelineLibrary() {
         });
         const data = await res.json();
         if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-        else alert(data.error || 'Fork failed');
+        else window.ui.toast(data.error || 'Fork failed', 'error');
       } finally {
         this.cloning = false;
       }
@@ -195,11 +196,11 @@ function pipelineLibrary() {
 
     async remove(p) {
       const note = p.publication && !p.publication.unpublished
-        ? '\n\nIts published versions stay available to others; unpublish it separately if you want it gone.' : '';
-      if (!confirm(`Delete pipeline "${p.title}"?${note}`)) return;
+        ? ' Its published versions stay available to colleagues; unpublish it from the Public section if you want it gone too.' : '';
+      if (!(await window.ui.confirm({title: 'Delete pipeline?', message: `"${p.title}" will be permanently deleted from your library.${note}`, confirmText: 'Delete', danger: true}))) return;
       const res = await fetch(`/api/pipelines/${p.pipeline_id}`, {method: 'DELETE'});
       if (res.ok) this.all = this.all.filter(x => x.pipeline_id !== p.pipeline_id);
-      else alert('Delete failed');
+      else window.ui.toast('Delete failed', 'error');
     },
 
     init() { this.load(); },

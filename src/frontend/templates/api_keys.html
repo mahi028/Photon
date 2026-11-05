@@ -157,13 +157,13 @@ function apiKeys() {
     },
 
     async revoke(k) {
-      if (!confirm(`Revoke "${k.name}"? Clients using it stop working immediately.`)) return;
+      if (!(await window.ui.confirm({title: 'Revoke API key?', message: `"${k.name}" stops working immediately for every client using it. This can't be undone.`, confirmText: 'Revoke', danger: true}))) return;
       const res = await fetch(`/api/keys/${k.key_id}`, {method: 'DELETE'});
       if (res.ok) {
         if (this.created && this.created.key_id === k.key_id) this.created = null;
         await this.load();
       } else {
-        alert('Revoke failed');
+        window.ui.toast('Revoke failed', 'error');
       }
     },
 
@@ -177,7 +177,7 @@ function apiKeys() {
         this.copied = which;
         setTimeout(() => { if (this.copied === which) this.copied = null; }, 1500);
       } catch (e) {
-        alert('Copy failed; select the text and copy manually.');
+        window.ui.toast('Copy failed; select the text and copy it manually.', 'error');
       }
     },
 

@@ -160,15 +160,15 @@ function sessionPane(sess) {
         const data = await res.json();
 
         if (!res.ok) {
-          alert('Error running snippet: ' + (data.error || 'Unknown'));
+          window.ui.toast('Error running snippet: ' + (data.error || 'Unknown'), 'error');
         } else if (data.batch_run) {
           const outRes = await fetch(`/api/sessions/${this.sess.session_id}/outputs`);
           if (outRes.ok) this._buildOutputsBySlot(await outRes.json());
         } else {
-          alert('Snippet finished. Stderr:\n' + (data.stderr || 'None'));
+          await window.ui.alert({title: 'Snippet finished', message: data.stderr || 'No stderr output.', mono: !!data.stderr});
         }
       } catch (e) {
-        alert('Execution failed: ' + e.message);
+        window.ui.toast('Execution failed: ' + e.message, 'error');
       } finally {
         this.running = false;
         this.statusMsg = '';
@@ -316,7 +316,7 @@ function sessionPane(sess) {
       if (!msg.pipeline || msg.savingPipeline) return;
       msg.savingPipeline = true;
       try {
-        const title = prompt('Save pipeline as:', 'LLM pipeline');
+        const title = await window.ui.prompt({title: 'Save pipeline', label: 'Name', value: 'LLM pipeline', confirmText: 'Save', required: true, maxLength: 120});
         if (!title) return;
         const res = await fetch('/api/pipelines', {
           method: 'POST',
@@ -328,7 +328,7 @@ function sessionPane(sess) {
         msg.savedPipelineId = data.pipeline_id;
         return data.pipeline_id;
       } catch (e) {
-        alert('Could not save pipeline: ' + e.message);
+        window.ui.toast('Could not save pipeline: ' + e.message, 'error');
       } finally {
         msg.savingPipeline = false;
       }
@@ -473,7 +473,7 @@ function sessionPane(sess) {
         this.sess.image_ids.push(upData.image_id);
         this.outputsBySlot[this.sess.images.length - 1] = [];
       } catch (e) {
-        alert('Add image failed: ' + e.message);
+        window.ui.toast('Add image failed: ' + e.message, 'error');
       } finally {
         this.addingImage = false;
       }

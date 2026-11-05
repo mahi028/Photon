@@ -158,11 +158,8 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       }
     },
 
-    _toast(message) {
-      this.issues = [{node_id: null, message}];
-      setTimeout(() => {
-        if (this.issues.length === 1 && this.issues[0].message === message) this.issues = [];
-      }, 6000);
+    _toast(message, kind = 'info') {
+      window.ui.toast(message, kind);
     },
 
     // --- palette ---------------------------------------------------------
@@ -401,7 +398,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         this.dirty = false;
         await this.validate();   // surface issues without blocking the save
       } catch (e) {
-        alert(e.message);
+        this._toast(e.message, 'error');
       } finally {
         this.saving = false;
       }
@@ -415,19 +412,27 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       });
       const data = await res.json();
       if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-      else alert(data.error || 'Clone failed');
+      else this._toast(data.error || 'Clone failed', 'error');
     },
 
     async publish() {
       if (this.isPreset || this.publishing) return;
       if (this.dirty) {
-        if (!confirm('Publishing uses the last SAVED version. Save your changes first?')) return;
+        const ok = await window.ui.confirm({title: 'Unsaved changes', message: 'Publishing uses the saved pipeline. Save your changes and continue?', confirmText: 'Save and continue'});
+        if (!ok) return;
         await this.save();
         if (this.dirty) return;
       }
-      const next = this.publication && !this.publication.unpublished
-        ? `v${this.publication.latest_version + 1}` : 'it';
-      const changelog = prompt(`Publish ${next} to everyone on this Photon instance.\n\nWhat changed? (optional)`, '');
+      const pub = this.publication;
+      const next = pub ? `v${pub.latest_version + 1}` : 'v1';
+      const changelog = await window.ui.prompt({
+        title: `Publish ${next}`,
+        message: 'Everyone on this Photon instance will be able to run and fork this version, including the code of any custom nodes it uses. Published versions never change.',
+        label: pub ? 'What changed?' : 'Notes (optional)',
+        placeholder: pub ? 'e.g. tuned the threshold for low-contrast scans' : '',
+        multiline: true,
+        confirmText: 'Publish',
+      });
       if (changelog === null) return;
       this.publishing = true;
       try {
@@ -439,11 +444,12 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         const data = await res.json();
         if (!res.ok) {
           this.issues = data.issues || [];
-          alert(data.error || 'Publish failed');
+          this._toast(data.error || 'Publish failed', 'error');
           return;
         }
         this.publication = {published_id: data.published_id, latest_version: data.version, unpublished: false};
-        this._toast(data.created ? `Published v${data.version}.` : `No changes since v${data.version}; nothing new published.`);
+        this._toast(data.created ? `Published v${data.version}.` : `No changes since v${data.version}; nothing new published.`,
+                    data.created ? 'success' : 'info');
       } finally {
         this.publishing = false;
       }
@@ -451,10 +457,11 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
     async unpublish() {
       if (!this.publication) return;
-      if (!confirm('Unpublish? Others can no longer see or run it. Versions are kept; publishing again restores it.')) return;
+      const ok = await window.ui.confirm({title: 'Unpublish pipeline?', message: 'Colleagues can no longer see or run it. Its versions are kept, and publishing again restores it.', confirmText: 'Unpublish', danger: true});
+      if (!ok) return;
       const res = await fetch(`/api/published/${this.publication.published_id}/unpublish`, {method: 'POST'});
-      if (res.ok) this.publication = {...this.publication, unpublished: true};
-      else alert('Unpublish failed');
+      if (res.ok) { this.publication = {...this.publication, unpublished: true}; this._toast('Unpublished.', 'success'); }
+      else this._toast('Unpublish failed', 'error');
     },
 
     async fork() {
@@ -465,7 +472,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       });
       const data = await res.json();
       if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-      else alert(data.error || 'Fork failed');
+      else this._toast(data.error || 'Fork failed', 'error');
     },
 
     switchVersion(v) {

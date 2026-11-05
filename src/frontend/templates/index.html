@@ -263,11 +263,11 @@ function app() {
         if (res.ok) {
           this.llmModel = d.model;
         } else {
-          alert('Model switch failed: ' + (d.error || 'unknown'));
+          window.ui.toast('Model switch failed: ' + (d.error || 'unknown'), 'error');
           await this.loadLlmInfo();
         }
       } catch (e) {
-        alert('Model switch failed: ' + e.message);
+        window.ui.toast('Model switch failed: ' + e.message, 'error');
       } finally {
         this.llmModelSwitching = false;
       }
