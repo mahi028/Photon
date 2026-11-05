@@ -49,7 +49,7 @@ from src.backend.config import config
 from src.backend.core.auth import api_keys
 from src.backend.core.image.fetch import FetchError, fetch_url
 from src.backend.core.image.ingest import IngestError, ingest_image_bytes
-from src.backend.core.pipeline import registry, runner
+from src.backend.core.pipeline import publishing, registry, runner
 from src.backend.core.session import store
 from src.backend.core.session.manager import get_manager
 
@@ -73,6 +73,8 @@ INSTRUCTIONS = (
         "Photon runs image-processing pipelines (DAGs of trusted ops) on uploaded images.\n"
         "Remote clients upload with upload_image(data_base64=..., filename=...) or a public url, "
         "and fetch full-res results with download_output.\n"
+        "Before building a graph, check list_pipelines(scope='public') for a colleague's "
+        "published pipeline that already does the job; run it with run_pipeline(published_id=...).\n"
         "Workflow: upload_image -> create_session -> list_ops -> validate_pipeline -> "
         "run_pipeline -> inspect returned previews -> adjust and re-run.\n"
         "Graph JSON: {\"nodes\": [{\"id\": \"g\", \"op\": \"to_grayscale\", \"params\": {}}], "
@@ -410,22 +412,32 @@ def validate_pipeline(graph: dict) -> dict:
 
 @_tool(structured_output=False)
 async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
-                       pipeline_id: str | None = None, title: str = "mcp") -> list:
-    """Run a pipeline on every image in the session. Pass either an ad-hoc
-    `graph` or a saved `pipeline_id`. Outputs are saved to the session (visible
-    in the web UI). Returns per-output ids/paths plus previews, or the error and
-    failing node so you can fix the graph and retry.
+                       pipeline_id: str | None = None, published_id: str | None = None,
+                       version: int | None = None, title: str = "mcp") -> list:
+    """Run a pipeline on every image in the session. Pass exactly one of: an
+    ad-hoc `graph`, a saved `pipeline_id` (yours or a preset), or a
+    `published_id` (anyone's public pipeline; optional `version`, default
+    latest). Outputs are saved to the session (visible in the web UI). Returns
+    per-output ids/paths plus previews, or the error and failing node so you
+    can fix the graph and retry.
     """
-    if bool(graph) == bool(pipeline_id):
-        raise ToolError("Provide exactly one of 'graph' or 'pipeline_id'.")
+    if sum(map(bool, (graph, pipeline_id, published_id))) != 1:
+        raise ToolError("Provide exactly one of 'graph', 'pipeline_id' or 'published_id'.")
     sess = _session(session_id)
     if sess.status == "running":
         raise ToolError("Session is already running a job.")
     if not sess.image_ids:
         raise ToolError("Session has no attached image; use upload_image/attach_image.")
+    customs = provenance = None
     if pipeline_id:
         p = _readable_pipeline(pipeline_id)
         graph, title = p["graph"], p["title"]
+    elif published_id:
+        try:
+            graph, customs, title, provenance = publishing.resolve_for_run(
+                _uid(), published_id, version)
+        except publishing.PublishError as e:
+            raise ToolError(str(e))
     for iid in sess.image_ids:                 # registry may predate UI uploads
         _image_meta(iid)
 
@@ -447,7 +459,8 @@ async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
 
     uid = _uid()
     result = await anyio.to_thread.run_sync(
-        lambda: run_pipeline_for_session(session_id, graph, title, uid, emit=emit))
+        lambda: run_pipeline_for_session(session_id, graph, title, uid, emit=emit,
+                                         custom_nodes=customs, provenance=provenance))
 
     if result.get("issues"):
         return [{"ok": False, "error": result["error"], "issues": result["issues"]}]
@@ -470,17 +483,87 @@ async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
 
 
 @_tool(annotations=_RO)
-def list_pipelines() -> list[dict]:
-    """Saved pipelines: this user's plus read-only presets (user_id null)."""
-    return [{"pipeline_id": p["pipeline_id"], "title": p["title"],
-             "description": p.get("description"), "preset": p["user_id"] is None}
-            for p in store.list_pipelines(_uid())]
+def list_pipelines(scope: str = "all", query: str | None = None) -> dict:
+    """Pipelines you can run.
+
+    scope: "mine" (your library + read-only presets), "public" (published by
+    anyone on this Photon instance, run via published_id), or "all" (both).
+    query: optional case-insensitive filter on title/description/author.
+    Prefer an existing public pipeline over writing a new graph when one fits.
+    """
+    if scope not in ("mine", "public", "all"):
+        raise ToolError("scope must be 'mine', 'public' or 'all'.")
+    q = (query or "").lower()
+    out: dict[str, Any] = {}
+    if scope in ("mine", "all"):
+        out["mine"] = [
+            {"pipeline_id": p["pipeline_id"], "title": p["title"],
+             "description": p.get("description"), "preset": p["user_id"] is None,
+             "publication": None if p["user_id"] is None else publishing.publication_for(p["pipeline_id"])}
+            for p in store.list_pipelines(_uid())
+            if not q or q in p["title"].lower() or q in (p.get("description") or "").lower()]
+    if scope in ("public", "all"):
+        out["public"] = [
+            {"published_id": p["published_id"], "title": p["title"], "description": p["description"],
+             "owner": p["owner"], "is_mine": p["is_mine"], "latest_version": p["latest_version"],
+             "node_count": p["node_count"], "uses_custom_nodes": p["uses_custom_nodes"],
+             "unpublished": bool(p["unpublished_at"])}
+            for p in publishing.list_public(_uid(), query)]
+    return out
 
 
 @_tool(annotations=_RO)
-def get_pipeline(pipeline_id: str) -> dict:
-    """Full saved pipeline including its graph."""
-    return _readable_pipeline(pipeline_id)
+def get_pipeline(pipeline_id: str | None = None, published_id: str | None = None,
+                 version: int | None = None) -> dict:
+    """Full pipeline including its graph. Give pipeline_id (your library or a
+    preset) or published_id (+ optional version; includes the version list and
+    the frozen custom node code the version runs)."""
+    if bool(pipeline_id) == bool(published_id):
+        raise ToolError("Provide exactly one of 'pipeline_id' or 'published_id'.")
+    if pipeline_id:
+        p = _readable_pipeline(pipeline_id)
+        if p["user_id"] is not None:
+            p["publication"] = publishing.publication_for(pipeline_id)
+        return p
+    d = publishing.get(_uid(), published_id, version)
+    if not d:
+        raise ToolError(f"Published pipeline (or that version) not found: {published_id}")
+    return d
+
+
+@_tool()
+def publish_pipeline(pipeline_id: str, changelog: str = "") -> dict:
+    """Publish one of your saved pipelines to everyone on this Photon instance
+    as its next immutable version (graph + the code of every custom node it
+    uses are frozen). Re-publishing the same pipeline adds a version; if
+    nothing changed, no new version is made. Must validate first."""
+    try:
+        return publishing.publish(_uid(), pipeline_id, changelog)
+    except publishing.PublishError as e:
+        if e.issues:
+            return {"published": False, "error": str(e), "issues": e.issues}
+        raise ToolError(str(e))
+
+
+@_tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+def unpublish_pipeline(published_id: str) -> dict:
+    """Hide one of your publications from others (versions are kept; publishing
+    the source pipeline again restores it)."""
+    if not publishing.unpublish(_uid(), published_id):
+        raise ToolError(f"Not found among your publications: {published_id}")
+    return {"unpublished": True, "published_id": published_id}
+
+
+@_tool()
+def fork_pipeline(published_id: str, version: int | None = None,
+                  title: str | None = None) -> dict:
+    """Copy a published version into your library as an editable pipeline. Its
+    custom nodes are imported into your library too (reused if you already
+    have an identical one). Returns the new pipeline_id."""
+    try:
+        return publishing.fork(_uid(), published_id, version, title)
+    except publishing.PublishError as e:
+        raise ToolError(str(e))
 
 
 @_tool()

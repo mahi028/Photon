@@ -233,3 +233,19 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - New `detach_image`, plus `delete_session`, which requires `confirm_title`. Tools carry `readOnlyHint` or `destructiveHint` annotations.
 
 **Known gaps.** There is a DNS-rebinding window between our resolve and requests' connect. `POST /api/upload` and `GET /api/images/<id>` were unauthenticated and are now `@login_required`. Images still have no owner, so any logged-in user who knows an image_id (a uuid4) can read its metadata.
+
+## D-035 — Published pipelines (instance-wide, versioned snapshots)
+
+**Context.** Custom nodes are resolved from the *running* user's library, so a pipeline that uses one only works for its author. Sharing meant copying code by hand.
+
+**Decision.**
+- Publishing turns one of your library pipelines into an immutable version, stored in `published_pipelines` and `published_pipeline_versions`. Each version freezes the graph and a full copy of every custom node it uses (code, ports, params, doc), keyed by the original `custom_node_id`.
+- Runs of a published version resolve custom nodes from that snapshot (`run_pipeline_for_session(custom_nodes=...)`), never from anyone's live library. The author's later edits or deletes never break existing versions.
+- Re-publishing appends version N+1 to the same publication (one per source pipeline). An identical snapshot is a no-op. The AST check is re-run at publish time.
+- Visibility is the whole instance; all users are trusted colleagues. Custom node code runs in the same rlimited subprocess as the author's own runs. The real boundary, the Docker executor, is Phase 2. Users can read a version's custom node code: they should see what they run.
+- Unpublishing hides a publication from others. The owner still sees it, versions are never deleted, and publishing again restores it. Deleting the source pipeline keeps the publication (`source_pipeline_id` is SET NULL).
+- Fork copies a version into the forker's library. Custom nodes are imported: an identical same-name node is reused, a clash is renamed `name (from owner)`. The graph is rewritten to the new ids, and a credit line goes in the description.
+- Output provenance (`GeneratedImage.code`) records `{published_id, version, title, owner, graph}`.
+- Core logic is in `core/pipeline/publishing.py`, with no HTTP. The UI is a Public section on the Pipelines page plus Publish/Unpublish in the editor, and `/published/<id>?version=N` is a read-only editor view with a version picker, Run and Fork. MCP gets `list_pipelines(scope, query)`, `get_pipeline(published_id, version)`, `run_pipeline(published_id, version)`, and `publish_pipeline`, `unpublish_pipeline`, `fork_pipeline`.
+
+**Not yet.** Example input/output thumbnails on cards. Photon's own chat LLM doesn't see public pipelines. Composite nodes (pipeline as a node). Per-pipeline MCP tools. Docker isolation.

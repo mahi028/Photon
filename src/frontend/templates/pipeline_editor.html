@@ -12,7 +12,7 @@
      into x-data: |tojson emits surrounding double quotes, which terminate a
      double-quoted HTML attribute and silently break Alpine's expression. -->
 <div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden"
-     x-data="pipelineEditor(window.PIPELINE_ID)">
+     x-data="pipelineEditor(window.PIPELINE_ID, window.PUBLISHED_ID, window.PUBLISHED_VERSION)">
 
   <!-- Top bar -->
   <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
@@ -22,8 +22,27 @@
       </a>
       <input type="text" x-model="title" :disabled="isPreset" @input="dirty = true"
              class="bg-transparent border border-transparent hover:border-gray-700 focus:border-indigo-500 rounded px-2 py-1 text-sm font-semibold text-gray-100 focus:outline-none min-w-0 flex-1 max-w-md disabled:opacity-70" />
-      <template x-if="isPreset">
+      <template x-if="isPreset && !published">
         <span class="badge-llm shrink-0">preset — read-only</span>
+      </template>
+      <template x-if="published">
+        <div class="flex items-center gap-2 shrink-0 min-w-0">
+          <span class="text-[11px] text-gray-400 truncate" x-text="`by ${published.owner}`"></span>
+          <select :value="publishedVersion" @change="switchVersion($event.target.value)"
+                  class="bg-gray-800 border border-gray-700 rounded text-[11px] text-gray-200 px-1.5 py-0.5 focus:outline-none focus:border-indigo-500"
+                  title="Published version">
+            <template x-for="v in published.versions" :key="v.version">
+              <option :value="v.version" :selected="v.version === publishedVersion"
+                      x-text="`v${v.version}` + (v.version === published.latest_version ? ' (latest)' : '')"></option>
+            </template>
+          </select>
+          <span x-show="published.unpublished_at" class="text-[11px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">unpublished</span>
+        </div>
+      </template>
+      <template x-if="publication && !published">
+        <a :href="`/published/${publication.published_id}`" class="text-[11px] shrink-0 px-1.5 py-0.5 rounded"
+           :class="publication.unpublished ? 'bg-gray-800 text-gray-400' : 'bg-emerald-900/60 text-emerald-300 hover:text-emerald-200'"
+           x-text="publication.unpublished ? `unpublished (v${publication.latest_version})` : `published v${publication.latest_version}`"></a>
       </template>
       <template x-if="dirty && !isPreset">
         <span class="text-[11px] text-amber-400 shrink-0">unsaved</span>
@@ -48,8 +67,20 @@
         <button @click="save()" :disabled="saving" class="btn-secondary text-sm px-3 py-1.5 disabled:opacity-50"
                 x-text="saving ? 'Saving…' : 'Save'"></button>
       </template>
-      <template x-if="isPreset">
+      <template x-if="!isPreset">
+        <button @click="publish()" :disabled="publishing" class="btn-secondary text-sm px-3 py-1.5 disabled:opacity-50"
+                :title="'Publish the saved pipeline to everyone on this instance as a new version'"
+                x-text="publishing ? 'Publishing…' : 'Publish'"></button>
+      </template>
+      <template x-if="publication && !publication.unpublished && !published">
+        <button @click="unpublish()" class="text-xs text-gray-500 hover:text-red-400 px-1">Unpublish</button>
+      </template>
+      <template x-if="isPreset && !published">
         <button @click="cloneToMine()" class="btn-secondary text-sm px-3 py-1.5">Clone to edit</button>
+      </template>
+      <template x-if="published">
+        <button @click="fork()" class="btn-secondary text-sm px-3 py-1.5"
+                title="Copy this version (and its custom nodes) into your library to edit">Fork</button>
       </template>
     </div>
   </header>
@@ -187,6 +218,10 @@
 {% endblock %}
 
 {% block scripts %}
-<script>window.PIPELINE_ID = {{ pipeline_id|tojson }};</script>
+<script>
+  window.PIPELINE_ID = {{ pipeline_id|tojson }};
+  window.PUBLISHED_ID = {{ (published_id or none)|tojson }};
+  window.PUBLISHED_VERSION = {{ (published_version or none)|tojson }};
+</script>
 <script src="{{ url_for('static', filename='js/pipelineEditor.js') }}"></script>
 {% endblock %}

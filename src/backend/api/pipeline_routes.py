@@ -19,7 +19,7 @@ from flask import Blueprint, jsonify, request
 from ..config import config
 from ..core.auth.middleware import get_current_user_id, login_required
 from ..core.image.thumbnail import generate_thumbnail
-from ..core.pipeline import registry, runner
+from ..core.pipeline import publishing, registry, runner
 from ..core.pipeline.executor import run_pipeline_subprocess
 from ..core.sandbox.subprocess_executor import ASTSecurityError, _check_ast_safety
 from ..core.session import store
@@ -53,7 +53,10 @@ def list_ops():
 @pipeline_bp.route("/pipelines", methods=["GET"])
 @login_required
 def list_pipelines():
-    return jsonify(store.list_pipelines(get_current_user_id())), 200
+    out = store.list_pipelines(get_current_user_id())
+    for p in out:
+        p["publication"] = None if p["is_preset"] else publishing.publication_for(p["pipeline_id"])
+    return jsonify(out), 200
 
 
 @pipeline_bp.route("/pipelines", methods=["POST"])
@@ -98,6 +101,7 @@ def get_pipeline(pipeline_id: str):
     p = _owned_pipeline(pipeline_id, get_current_user_id(), for_write=False)
     if not p:
         return jsonify({"error": "Pipeline not found"}), 404
+    p["publication"] = None if p["is_preset"] else publishing.publication_for(pipeline_id)
     return jsonify(p), 200
 
 
@@ -137,6 +141,72 @@ def validate_pipeline():
                for cn in store.list_custom_nodes(get_current_user_id())}
     issues = runner.validate(graph, custom_nodes=customs)
     return jsonify({"valid": not issues, "issues": [i.to_dict() for i in issues]}), 200
+
+
+# ---------------------------------------------------------------------------
+# Published pipelines (instance-wide, versioned — D-035)
+# ---------------------------------------------------------------------------
+
+def _int_or_none(v):
+    try:
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _publish_error(e: "publishing.PublishError"):
+    body = {"error": str(e)}
+    if e.issues:
+        body["issues"] = e.issues
+    return jsonify(body), e.status
+
+
+@pipeline_bp.route("/pipelines/<pipeline_id>/publish", methods=["POST"])
+@login_required
+def publish_pipeline(pipeline_id: str):
+    """Publish the saved state of one of your pipelines as its next version."""
+    data = request.get_json(silent=True) or {}
+    try:
+        res = publishing.publish(get_current_user_id(), pipeline_id, data.get("changelog") or "")
+    except publishing.PublishError as e:
+        return _publish_error(e)
+    return jsonify(res), 201 if res["created"] else 200
+
+
+@pipeline_bp.route("/published", methods=["GET"])
+@login_required
+def list_published():
+    return jsonify(publishing.list_public(get_current_user_id(), request.args.get("q"))), 200
+
+
+@pipeline_bp.route("/published/<published_id>", methods=["GET"])
+@login_required
+def get_published(published_id: str):
+    d = publishing.get(get_current_user_id(), published_id,
+                       _int_or_none(request.args.get("version")))
+    if not d:
+        return jsonify({"error": "Published pipeline not found"}), 404
+    return jsonify(d), 200
+
+
+@pipeline_bp.route("/published/<published_id>/unpublish", methods=["POST"])
+@login_required
+def unpublish_pipeline(published_id: str):
+    if not publishing.unpublish(get_current_user_id(), published_id):
+        return jsonify({"error": "Published pipeline not found"}), 404
+    return jsonify({"status": "unpublished"}), 200
+
+
+@pipeline_bp.route("/published/<published_id>/fork", methods=["POST"])
+@login_required
+def fork_published(published_id: str):
+    data = request.get_json(silent=True) or {}
+    try:
+        res = publishing.fork(get_current_user_id(), published_id,
+                              _int_or_none(data.get("version")), data.get("title"))
+    except publishing.PublishError as e:
+        return _publish_error(e)
+    return jsonify(res), 201
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +276,8 @@ def _finish(session_id: str) -> None:
 
 def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                              user_id: str, source_turn_index: int | None = None,
-                             emit=None) -> dict:
+                             emit=None, custom_nodes: dict | None = None,
+                             provenance: dict | None = None) -> dict:
     """Execute a graph against every image attached to a session.
 
     Shared by POST /sessions/<id>/run-pipeline and the LLM loop's
@@ -216,6 +287,9 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
 
     emit: optional callable(event_dict) replacing the SSE push — used by the
     MCP server, which has no browser stream to feed.
+    custom_nodes: resolve custom_node_ids from this dict instead of the
+    runner's own library — a published pipeline's frozen snapshot (D-035).
+    provenance: extra keys recorded with each output (e.g. published_id/version).
     """
     push = emit or (lambda ev: _push(session_id, ev))
     manager = get_manager()
@@ -226,10 +300,12 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
     from .upload_routes import get_image_registry
     registry_images = get_image_registry()
 
-    customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
+    customs = custom_nodes if custom_nodes is not None else {
+        cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
     issues = runner.validate(graph, custom_nodes=customs)
     if issues:
         return {"error": "Pipeline is invalid", "issues": [i.to_dict() for i in issues]}
+    provenance_json = json.dumps({**provenance, "graph": graph} if provenance else graph, indent=2)
 
     manager.set_status(session_id, "running")
     run_id = uuid.uuid4().hex[:8]
@@ -291,7 +367,7 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                     description=description,
                     path=str(out_path),
                     preview_path=str(preview_path) if preview_path and preview_path.exists() else "",
-                    code=json.dumps(graph, indent=2),   # graph IS the provenance
+                    code=provenance_json,   # graph IS the provenance
                     source_turn_index=source_turn_index,
                     produced_at=datetime.utcnow(),
                     source_iteration=slot_idx,
@@ -327,17 +403,26 @@ def run_pipeline_route(session_id: str):
     data = request.get_json(force=True)
     graph = data.get("graph")
     title = (data.get("title") or "adhoc").strip()
+    customs = None
+    provenance = None
 
-    if data.get("pipeline_id"):
+    if data.get("published_id"):
+        try:
+            graph, customs, title, provenance = publishing.resolve_for_run(
+                user_id, data["published_id"], _int_or_none(data.get("version")))
+        except publishing.PublishError as e:
+            return jsonify({"error": str(e)}), e.status
+    elif data.get("pipeline_id"):
         p = _owned_pipeline(data["pipeline_id"], user_id, for_write=False)
         if not p:
             return jsonify({"error": "Pipeline not found"}), 404
         graph, title = p["graph"], p["title"]
 
     if not graph:
-        return jsonify({"error": "pipeline_id or graph is required"}), 400
+        return jsonify({"error": "pipeline_id, published_id or graph is required"}), 400
 
-    customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
+    if customs is None:
+        customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
     issues = runner.validate(graph, custom_nodes=customs)
     if issues:
         return jsonify({"error": "Pipeline is invalid",
@@ -349,7 +434,8 @@ def run_pipeline_route(session_id: str):
 
     def _worker():
         try:
-            run_pipeline_for_session(session_id, graph, title, user_id)
+            run_pipeline_for_session(session_id, graph, title, user_id,
+                                     custom_nodes=customs, provenance=provenance)
         finally:
             _finish(session_id)
 

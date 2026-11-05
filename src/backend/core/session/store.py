@@ -173,6 +173,39 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id)")
+        # Published pipelines (D-035): an instance-wide, immutable, versioned
+        # snapshot of a user's pipeline. Each version freezes the graph AND the
+        # code of every custom node it uses, so runs by other users never
+        # depend on the author's live (editable, per-user) library.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS published_pipelines (
+                published_id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                source_pipeline_id TEXT UNIQUE,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                latest_version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                unpublished_at TEXT,
+                FOREIGN KEY (owner_id) REFERENCES users (user_id) ON DELETE CASCADE,
+                FOREIGN KEY (source_pipeline_id) REFERENCES pipelines (pipeline_id) ON DELETE SET NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS published_pipeline_versions (
+                published_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                graph_json TEXT NOT NULL,
+                custom_nodes_json TEXT NOT NULL DEFAULT '{}',
+                changelog TEXT NOT NULL DEFAULT '',
+                published_at TEXT NOT NULL,
+                PRIMARY KEY (published_id, version),
+                FOREIGN KEY (published_id) REFERENCES published_pipelines (published_id) ON DELETE CASCADE
+            )
+        """)
         _seed_presets(conn)
 
 
@@ -611,6 +644,127 @@ def delete_custom_node(custom_node_id: str, user_id: str) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("DELETE FROM custom_nodes WHERE custom_node_id = ? AND user_id = ?",
                      (custom_node_id, user_id))
+
+
+# ---------------------------------------------------------------------------
+# Published pipelines
+# ---------------------------------------------------------------------------
+
+_PUB_SELECT = """
+    SELECT p.*, u.username AS owner_username, u.display_name AS owner_display_name,
+           v.published_at AS latest_published_at, v.graph_json AS latest_graph_json
+    FROM published_pipelines p
+    JOIN users u ON u.user_id = p.owner_id
+    JOIN published_pipeline_versions v
+      ON v.published_id = p.published_id AND v.version = p.latest_version
+"""
+
+
+def _pub_row_to_dict(row) -> Dict[str, Any]:
+    graph = json.loads(row["latest_graph_json"])
+    return {
+        "published_id": row["published_id"],
+        "owner_id": row["owner_id"],
+        "owner_username": row["owner_username"],
+        "owner_display_name": row["owner_display_name"],
+        "source_pipeline_id": row["source_pipeline_id"],
+        "title": row["title"],
+        "description": row["description"],
+        "latest_version": row["latest_version"],
+        "node_count": len(graph.get("nodes") or []),
+        "uses_custom_nodes": any(n.get("custom_node_id") for n in graph.get("nodes") or []),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "latest_published_at": row["latest_published_at"],
+        "unpublished_at": row["unpublished_at"],
+    }
+
+
+def list_published_pipelines(include_unpublished_of: Optional[str] = None) -> List[Dict[str, Any]]:
+    """All live publications, newest first. include_unpublished_of=user_id also
+    returns that user's unpublished ones (so owners can see and re-publish)."""
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute(_PUB_SELECT + """
+            WHERE p.unpublished_at IS NULL OR p.owner_id = ?
+            ORDER BY p.updated_at DESC
+        """, (include_unpublished_of or "",)).fetchall()
+        return [_pub_row_to_dict(r) for r in rows]
+
+
+def load_published_pipeline(published_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute(_PUB_SELECT + " WHERE p.published_id = ?",
+                           (published_id,)).fetchone()
+        return _pub_row_to_dict(row) if row else None
+
+
+def find_published_by_source(pipeline_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute(_PUB_SELECT + " WHERE p.source_pipeline_id = ?",
+                           (pipeline_id,)).fetchone()
+        return _pub_row_to_dict(row) if row else None
+
+
+def list_published_versions(published_id: str) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT version, title, changelog, published_at FROM published_pipeline_versions
+            WHERE published_id = ? ORDER BY version DESC
+        """, (published_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def load_published_version(published_id: str, version: int) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("""
+            SELECT * FROM published_pipeline_versions WHERE published_id = ? AND version = ?
+        """, (published_id, version)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["graph"] = json.loads(d.pop("graph_json"))
+        d["custom_nodes"] = json.loads(d.pop("custom_nodes_json"))
+        return d
+
+
+def add_published_version(published_id: str, owner_id: str, source_pipeline_id: str,
+                          title: str, description: str, graph: dict,
+                          custom_nodes: dict, changelog: str, now: str) -> int:
+    """Create the publication if needed and append the next version, atomically.
+    Re-publishing also clears unpublished_at. Returns the new version number."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT latest_version FROM published_pipelines WHERE published_id = ?",
+                           (published_id,)).fetchone()
+        version = (row["latest_version"] + 1) if row else 1
+        if row:
+            conn.execute("""
+                UPDATE published_pipelines SET title = ?, description = ?, latest_version = ?,
+                       updated_at = ?, unpublished_at = NULL
+                WHERE published_id = ?
+            """, (title, description, version, now, published_id))
+        else:
+            conn.execute("""
+                INSERT INTO published_pipelines (published_id, owner_id, source_pipeline_id,
+                    title, description, latest_version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (published_id, owner_id, source_pipeline_id, title, description,
+                  version, now, now))
+        conn.execute("""
+            INSERT INTO published_pipeline_versions (published_id, version, title, description,
+                graph_json, custom_nodes_json, changelog, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (published_id, version, title, description, json.dumps(graph),
+              json.dumps(custom_nodes), changelog, now))
+        return version
+
+
+def set_published_unpublished(published_id: str, owner_id: str, unpublished_at: Optional[str]) -> bool:
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("""
+            UPDATE published_pipelines SET unpublished_at = ?
+            WHERE published_id = ? AND owner_id = ?
+        """, (unpublished_at, published_id, owner_id))
+        return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------

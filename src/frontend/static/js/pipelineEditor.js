@@ -16,9 +16,16 @@
 
 const INPUT_OP = '__input__';
 
-function pipelineEditor(pipelineId) {
+function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null) {
   return {
     pipelineId,
+    // Published mode (D-035): viewing an instance-wide published version.
+    // Read-only like a preset; custom nodes come from the version's snapshot.
+    publishedId,
+    publishedVersion,
+    published: null,        // GET /api/published/<id> payload in published mode
+    publication: null,      // own pipeline's publish status (library mode)
+    publishing: false,
     editor: null,
     catalog: {ops: [], coercions: [], custom_nodes: []},
     opsByName: {},
@@ -47,9 +54,12 @@ function pipelineEditor(pipelineId) {
         return;
       }
 
+      const pipeUrl = this.publishedId
+        ? `/api/published/${this.publishedId}` + (this.publishedVersion ? `?version=${this.publishedVersion}` : '')
+        : `/api/pipelines/${this.pipelineId}`;
       const [catRes, pipeRes, sessRes] = await Promise.all([
         fetch('/api/ops'),
-        fetch(`/api/pipelines/${this.pipelineId}`),
+        fetch(pipeUrl),
         fetch('/api/sessions'),
       ]);
 
@@ -63,8 +73,19 @@ function pipelineEditor(pipelineId) {
         (this.catalog.custom_nodes || []).map(c => [c.custom_node_id, c]));
 
       this.pipeline = await pipeRes.json();
-      this.title = this.pipeline.title;
-      this.isPreset = this.pipeline.is_preset;
+      if (this.publishedId) {
+        this.published = this.pipeline;
+        this.publishedVersion = this.pipeline.version;
+        this.title = this.pipeline.version_title;
+        this.isPreset = true;   // read-only
+        for (const [cid, cn] of Object.entries(this.pipeline.custom_nodes || {})) {
+          this.customById[cid] = {custom_node_id: cid, ...cn};
+        }
+      } else {
+        this.title = this.pipeline.title;
+        this.isPreset = this.pipeline.is_preset;
+        this.publication = this.pipeline.publication || null;
+      }
       if (sessRes.ok) {
         this.sessions = await sessRes.json();
         if (this.sessions.length) this.selectedSessionId = this.sessions[0].session_id;
@@ -351,6 +372,10 @@ function pipelineEditor(pipelineId) {
     // --- actions ---------------------------------------------------------
 
     async validate() {
+      // A published version was validated at publish time against its own
+      // snapshot; the server re-validates on run. /api/pipelines/validate only
+      // knows the viewer's library, so it would reject the author's custom nodes.
+      if (this.publishedId) { this.issues = []; return true; }
       const graph = this._exportGraph();
       const res = await fetch('/api/pipelines/validate', {
         method: 'POST',
@@ -393,6 +418,60 @@ function pipelineEditor(pipelineId) {
       else alert(data.error || 'Clone failed');
     },
 
+    async publish() {
+      if (this.isPreset || this.publishing) return;
+      if (this.dirty) {
+        if (!confirm('Publishing uses the last SAVED version. Save your changes first?')) return;
+        await this.save();
+        if (this.dirty) return;
+      }
+      const next = this.publication && !this.publication.unpublished
+        ? `v${this.publication.latest_version + 1}` : 'it';
+      const changelog = prompt(`Publish ${next} to everyone on this Photon instance.\n\nWhat changed? (optional)`, '');
+      if (changelog === null) return;
+      this.publishing = true;
+      try {
+        const res = await fetch(`/api/pipelines/${this.pipelineId}/publish`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({changelog}),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          this.issues = data.issues || [];
+          alert(data.error || 'Publish failed');
+          return;
+        }
+        this.publication = {published_id: data.published_id, latest_version: data.version, unpublished: false};
+        this._toast(data.created ? `Published v${data.version}.` : `No changes since v${data.version}; nothing new published.`);
+      } finally {
+        this.publishing = false;
+      }
+    },
+
+    async unpublish() {
+      if (!this.publication) return;
+      if (!confirm('Unpublish? Others can no longer see or run it. Versions are kept; publishing again restores it.')) return;
+      const res = await fetch(`/api/published/${this.publication.published_id}/unpublish`, {method: 'POST'});
+      if (res.ok) this.publication = {...this.publication, unpublished: true};
+      else alert('Unpublish failed');
+    },
+
+    async fork() {
+      const res = await fetch(`/api/published/${this.publishedId}/fork`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({version: this.publishedVersion}),
+      });
+      const data = await res.json();
+      if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
+      else alert(data.error || 'Fork failed');
+    },
+
+    switchVersion(v) {
+      window.location.href = `/published/${this.publishedId}?version=${v}`;
+    },
+
     async run() {
       if (this.running) return;
       if (!this.selectedSessionId) { this._toast('Pick a session to run against.'); return; }
@@ -407,7 +486,9 @@ function pipelineEditor(pipelineId) {
         const res = await fetch(`/api/sessions/${this.selectedSessionId}/run-pipeline`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({graph, title: this.title}),
+          body: JSON.stringify(this.publishedId
+            ? {published_id: this.publishedId, version: this.publishedVersion}
+            : {graph, title: this.title}),
         });
         const data = await res.json();
         if (!res.ok) {

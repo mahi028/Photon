@@ -100,4 +100,13 @@ def create_app() -> Flask:
         from flask import render_template
         return render_template("pipeline_editor.html", pipeline_id=pipeline_id)
 
+    @app.route("/published/<published_id>")
+    @login_required
+    def published_pipeline_view(published_id: str):
+        """Read-only editor view of a published pipeline version (D-035)."""
+        from flask import render_template, request
+        version = request.args.get("version", type=int)
+        return render_template("pipeline_editor.html", pipeline_id=None,
+                               published_id=published_id, published_version=version)
+
     return app

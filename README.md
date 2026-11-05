@@ -102,7 +102,9 @@ Each call acts as the key's owner, so results appear in that user's sessions. Ke
 claude mcp add photon -- uv run --directory /path/to/Photon --extra mcp python -m src.mcp_server
 ```
 
-Tools: `upload_image`, `create_session`, `attach_image`, `detach_image`, `delete_session`, `list_sessions`, `get_session`, `get_output`, `download_output`, `list_ops`, `validate_pipeline`, `run_pipeline`, `list_pipelines`, `get_pipeline`, `save_pipeline`. Read-only tools carry `readOnlyHint` and the two destructive ones `destructiveHint`, so clients can auto-approve the former and prompt for the latter. `delete_session` also needs the session's exact title as `confirm_title`.
+Tools: `upload_image`, `create_session`, `attach_image`, `detach_image`, `delete_session`, `list_sessions`, `get_session`, `get_output`, `download_output`, `list_ops`, `validate_pipeline`, `run_pipeline`, `list_pipelines`, `get_pipeline`, `save_pipeline`, `publish_pipeline`, `unpublish_pipeline`, `fork_pipeline`. Read-only tools carry `readOnlyHint` and the two destructive ones `destructiveHint`, so clients can auto-approve the former and prompt for the latter. `delete_session` also needs the session's exact title as `confirm_title`.
+
+**Public pipelines.** A pipeline published from the editor (or with `publish_pipeline`) is visible to everyone on the instance: in the **Public** section of the Pipelines page, and to any MCP client via `list_pipelines(scope="public")`. Each publish is an immutable version that freezes the graph and the code of the custom nodes it uses, so colleagues can run it with `run_pipeline(published_id=..., version=...)` even after you edit or delete your own copy. **Fork** copies a version, custom nodes included, into your own library to edit.
 
 Getting images in and out from a remote client:
 
