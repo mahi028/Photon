@@ -23,7 +23,10 @@ SQLite on every call (see SessionManager.invalidate) so UI-side edits are seen.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import io
+import mimetypes
 import os
 import sys
 import uuid
@@ -34,16 +37,17 @@ from typing import Any
 import anyio
 import anyio.from_thread
 import anyio.to_thread
-import requests
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import Context, Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import BlobResourceContents, EmbeddedResource, ToolAnnotations
 from PIL import Image as PILImage
 
 from src.backend.config import config
 from src.backend.core.auth import api_keys
+from src.backend.core.image.fetch import FetchError, fetch_url
 from src.backend.core.image.ingest import IngestError, ingest_image_bytes
 from src.backend.core.pipeline import registry, runner
 from src.backend.core.session import store
@@ -67,6 +71,8 @@ _transport = "stdio"   # set by main()
 
 INSTRUCTIONS = (
         "Photon runs image-processing pipelines (DAGs of trusted ops) on uploaded images.\n"
+        "Remote clients upload with upload_image(data_base64=..., filename=...) or a public url, "
+        "and fetch full-res results with download_output.\n"
         "Workflow: upload_image -> create_session -> list_ops -> validate_pipeline -> "
         "run_pipeline -> inspect returned previews -> adjust and re-run.\n"
         "Graph JSON: {\"nodes\": [{\"id\": \"g\", \"op\": \"to_grayscale\", \"params\": {}}], "
@@ -81,6 +87,7 @@ INSTRUCTIONS = (
 # (build_server), because auth is fixed at MCPServer construction: HTTP gets a
 # bearer-token verifier, stdio doesn't.
 _TOOLS: list[tuple[Any, dict]] = []
+_RO = ToolAnnotations(read_only_hint=True)   # lets clients auto-approve
 
 
 def _tool(**opts):
@@ -172,31 +179,74 @@ def _readable_pipeline(pipeline_id: str) -> dict:
 # Images & sessions
 # ---------------------------------------------------------------------------
 
+def _path_roots() -> list[Path] | None:
+    """Directories `upload_image(path=...)` may read from. None = anywhere (stdio).
+
+    Over HTTP the caller is remote and possibly prompt-injected, and reads run
+    as the server's OS user — so paths are refused unless PHOTON_MCP_PATH_ROOTS
+    (os.pathsep-separated) allow-lists directories. Photon's own volumes/ is
+    never readable that way: it holds every user's uploads and outputs.
+    """
+    if _transport != "http":
+        return None
+    raw = os.getenv("PHOTON_MCP_PATH_ROOTS", "")
+    return [Path(r).expanduser().resolve() for r in raw.split(os.pathsep) if r.strip()]
+
+
+def _read_local(path: str) -> tuple[bytes, str]:
+    p = Path(path).expanduser().resolve()
+    roots = _path_roots()
+    if roots is not None:
+        if not roots:
+            raise ToolError("Server-side paths are disabled over HTTP; send the image as "
+                            "data_base64 (with filename) or as a url instead.")
+        if not any(p.is_relative_to(r) for r in roots):
+            raise ToolError("Path is outside the directories this server allows "
+                            "(PHOTON_MCP_PATH_ROOTS).")
+        if p.is_relative_to(config.VOLUMES_DIR.resolve()):
+            raise ToolError("Photon's data directory can't be read by path.")
+    if not p.is_file():
+        raise ToolError(f"File not found: {p}")
+    return p.read_bytes(), p.name
+
+
 @_tool(structured_output=False)
 def upload_image(path: str | None = None, url: str | None = None,
+                 data_base64: str | None = None, filename: str | None = None,
                  session_id: str | None = None) -> list:
-    """Upload an image from a local file path or an http(s) URL.
+    """Upload an image. Give exactly one source:
+      * data_base64 + filename: the file's bytes, base64-encoded (works from any
+        client; filename's extension sets the format);
+      * url: an http(s) URL on the public internet;
+      * path: a file on the Photon server's disk (stdio; over HTTP only inside
+        directories the operator allow-listed).
 
     Supported: .png .jpg .jpeg .tif .tiff .npy .bmp .webp. If session_id is given,
     the image is also attached to that session. Returns image_id, metadata
     (shape, dtype, value range, guessed kind) and a preview.
     """
-    if bool(path) == bool(url):
-        raise ToolError("Provide exactly one of 'path' or 'url'.")
+    if sum(map(bool, (path, url, data_base64))) != 1:
+        raise ToolError("Provide exactly one of 'path', 'url' or 'data_base64'.")
     if path:
-        p = Path(path).expanduser()
-        if not p.is_file():
-            raise ToolError(f"File not found: {p}")
-        data, name = p.read_bytes(), p.name
-    else:
-        if not url.startswith(("http://", "https://")):
-            raise ToolError("url must be http(s).")
+        data, name = _read_local(path)
+    elif url:
         try:
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-        except Exception as e:
-            raise ToolError(f"Failed to fetch URL: {e}")
-        data, name = resp.content, (url.split("?")[0].rstrip("/").split("/")[-1] or "download")
+            data, name = fetch_url(url)
+        except FetchError as e:
+            raise ToolError(str(e))
+    else:
+        if not filename:
+            raise ToolError("data_base64 needs a filename (e.g. 'scan.png') for its format.")
+        b64 = data_base64.strip()
+        if b64.startswith("data:") and "," in b64:       # tolerate data: URIs
+            b64 = b64.split(",", 1)[1]
+        if len(b64) * 3 // 4 > config.MAX_UPLOAD_BYTES:
+            raise ToolError(f"Image too large (max {config.MAX_UPLOAD_MB} MB).")
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise ToolError("data_base64 is not valid base64.")
+        name = Path(filename).name
 
     if session_id:
         _session(session_id)                # ownership check before writing anything
@@ -243,13 +293,13 @@ def attach_image(session_id: str, image_id: str) -> dict:
     return {"session_id": session_id, "image_ids": sess.image_ids}
 
 
-@_tool()
+@_tool(annotations=_RO)
 def list_sessions() -> list[dict]:
     """List this user's sessions, most recently updated first."""
     return get_manager().list_sessions(_uid())
 
 
-@_tool()
+@_tool(annotations=_RO)
 def get_session(session_id: str) -> dict:
     """Session details: attached images (with metadata) and produced outputs."""
     sess = _session(session_id)
@@ -263,7 +313,7 @@ def get_session(session_id: str) -> dict:
             "images": images, "outputs": outputs}
 
 
-@_tool(structured_output=False)
+@_tool(structured_output=False, annotations=_RO)
 def get_output(session_id: str, output_id: str) -> list:
     """Fetch one output: full-res file path, the graph/code that produced it, and a preview."""
     sess = _session(session_id)
@@ -275,11 +325,65 @@ def get_output(session_id: str, output_id: str) -> list:
     return [info, *filter(None, [_preview(out.preview_path or out.path)])]
 
 
+@_tool(structured_output=False, annotations=_RO)
+def download_output(session_id: str, output_id: str) -> list:
+    """Full-resolution output file as an embedded resource (base64 blob), for
+    clients that can't read the server's disk. get_output's preview is a
+    downscaled JPEG; this is the actual saved file. Capped at
+    PHOTON_MCP_MAX_DOWNLOAD_MB (default 25)."""
+    sess = _session(session_id)
+    out = next((o for o in sess.outputs if o.image_id == output_id), None)
+    if not out or not out.path or not Path(out.path).is_file():
+        raise ToolError(f"Output not found: {output_id}")
+    p = Path(out.path)
+    cap_mb = int(os.getenv("PHOTON_MCP_MAX_DOWNLOAD_MB", "25"))
+    if p.stat().st_size > cap_mb * 1024 * 1024:
+        raise ToolError(f"Output is {p.stat().st_size / 2**20:.1f} MB, over the "
+                        f"{cap_mb} MB download cap; use get_output's path or the web UI.")
+    mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    blob = BlobResourceContents(uri=f"photon://sessions/{session_id}/outputs/{output_id}/{p.name}",
+                                mime_type=mime,
+                                blob=base64.b64encode(p.read_bytes()).decode("ascii"))
+    return [{"output_id": output_id, "filename": p.name, "mime_type": mime,
+             "bytes": p.stat().st_size},
+            EmbeddedResource(type="resource", resource=blob)]
+
+
+@_tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+def detach_image(session_id: str, image_id: str) -> dict:
+    """Detach an image from a session. The uploaded image itself is kept (other
+    sessions may use it); future runs just skip it."""
+    sess = _session(session_id)
+    if image_id not in sess.image_ids:
+        raise ToolError(f"Image {image_id} is not attached to session {session_id}.")
+    sess = get_manager().remove_image(session_id, image_id)
+    return {"session_id": session_id, "image_ids": sess.image_ids}
+
+
+@_tool(annotations=ToolAnnotations(destructive_hint=True))
+def delete_session(session_id: str, confirm_title: str) -> dict:
+    """Permanently delete a session: its outputs, history, share links, and any
+    source image no other session uses. Irreversible. confirm_title must equal
+    the session's current title exactly (see get_session) — a guard against
+    deleting the wrong session."""
+    sess = _session(session_id)
+    if confirm_title != sess.title:
+        raise ToolError(f"confirm_title does not match this session's title ({sess.title!r}); "
+                        "nothing deleted.")
+    deleted = get_manager().delete_session(session_id, _uid())
+    if deleted is None:
+        raise ToolError(f"Session not found: {session_id}")
+    reg = get_image_registry()
+    for iid in deleted:
+        reg.pop(iid, None)
+    return {"deleted": True, "session_id": session_id, "images_deleted": deleted}
+
+
 # ---------------------------------------------------------------------------
 # Ops & pipelines
 # ---------------------------------------------------------------------------
 
-@_tool()
+@_tool(annotations=_RO)
 def list_ops(category: str | None = None) -> dict:
     """Op catalog: every op's typed input/output ports and params, the port types,
     the implicit coercion table, and this user's saved custom nodes (usable via
@@ -296,7 +400,7 @@ def list_ops(category: str | None = None) -> dict:
     return cat
 
 
-@_tool()
+@_tool(annotations=_RO)
 def validate_pipeline(graph: dict) -> dict:
     """Statically check a pipeline graph (unknown ops, port names/types, cycles,
     params, unconnected inputs). Returns {valid, issues[]}. Nothing runs."""
@@ -365,7 +469,7 @@ async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
     return [summary, *content]
 
 
-@_tool()
+@_tool(annotations=_RO)
 def list_pipelines() -> list[dict]:
     """Saved pipelines: this user's plus read-only presets (user_id null)."""
     return [{"pipeline_id": p["pipeline_id"], "title": p["title"],
@@ -373,7 +477,7 @@ def list_pipelines() -> list[dict]:
             for p in store.list_pipelines(_uid())]
 
 
-@_tool()
+@_tool(annotations=_RO)
 def get_pipeline(pipeline_id: str) -> dict:
     """Full saved pipeline including its graph."""
     return _readable_pipeline(pipeline_id)

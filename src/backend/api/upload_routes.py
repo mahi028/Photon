@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import requests
 from flask import Blueprint, request, jsonify
 
+from ..core.auth.middleware import login_required
+from ..core.image.fetch import FetchError, fetch_url
 from ..core.image.ingest import IngestError, ingest_image_bytes
 
 upload_bp = Blueprint("upload", __name__)
@@ -27,6 +28,7 @@ _restore_image_registry()
 
 
 @upload_bp.route("/upload", methods=["POST"])
+@login_required
 def upload_image():
     """Accept a multipart file or a JSON {url} field and process the upload."""
     # --- Determine source ---
@@ -36,16 +38,10 @@ def upload_image():
         file_bytes = f.read()
 
     elif request.is_json and "url" in request.json:
-        url = request.json["url"]
         try:
-            resp = requests.get(url, timeout=30, stream=True)
-            resp.raise_for_status()
-        except Exception as e:
-            return jsonify({"error": f"Failed to fetch URL: {e}"}), 400
-
-        # Derive filename from URL
-        original_filename = url.rstrip("/").split("/")[-1] or "download"
-        file_bytes = resp.content
+            file_bytes, original_filename = fetch_url(str(request.json["url"]))
+        except FetchError as e:
+            return jsonify({"error": str(e)}), 400
 
     else:
         return jsonify({"error": "Provide either 'file' (multipart) or 'url' (JSON)."}), 400
@@ -65,6 +61,7 @@ def upload_image():
 
 
 @upload_bp.route("/images/<image_id>", methods=["GET"])
+@login_required
 def get_image_metadata(image_id: str):
     """Return metadata for a previously uploaded image."""
     meta = _image_registry.get(image_id)

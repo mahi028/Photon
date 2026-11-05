@@ -221,3 +221,15 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 **Key handling:** `pk_` + 32 random bytes; only the SHA-256 hex digest is stored, and the plaintext is returned once at creation. A plain hash (not bcrypt) is enough because keys are high-entropy random, and verification runs on every request. `last_used_at` is written at most once per minute per key. `POST /api/keys` requires a real JSON body (no `force=True`), so a cross-site form post can't mint a key.
 **stdio unchanged:** local and single-user, still `PHOTON_MCP_USER`. The HTTP transport ignores it. Tools are now collected in a list and registered by `build_server()`, because auth is fixed when `MCPServer` is constructed.
 **Not done:** OAuth sign-in for MCP clients (no copy-paste), key scopes (read-only vs run), and an admin CLI to mint keys.
+
+## D-034 — Remote-safe image I/O for MCP (and URL fetch hardening)
+
+**Context.** Over streamable HTTP the MCP caller is remote and may be prompt-injected. `upload_image(path=)` read any file the server's OS user could read (including other users' uploads under `volumes/`), and `url=` fetches (MCP and `POST /api/upload`) could reach loopback, the LAN, or cloud metadata (SSRF).
+
+**Decision.**
+- `upload_image` gains `data_base64` + `filename` as the portable way in. `path` stays unrestricted over stdio. Over HTTP it is refused unless `PHOTON_MCP_PATH_ROOTS` allow-lists directories, and `volumes/` is never readable.
+- `core/image/fetch.py::fetch_url` is shared by both entry points. It allows http(s) only, every hop (redirects followed manually, max 3) must resolve to global addresses, and the streamed body is capped at `MAX_UPLOAD_BYTES`. `PHOTON_ALLOW_PRIVATE_URLS=1` opts out.
+- `download_output` returns full-res outputs as an MCP embedded resource, capped by `PHOTON_MCP_MAX_DOWNLOAD_MB` (default 25).
+- New `detach_image`, plus `delete_session`, which requires `confirm_title`. Tools carry `readOnlyHint` or `destructiveHint` annotations.
+
+**Known gaps.** There is a DNS-rebinding window between our resolve and requests' connect. `POST /api/upload` and `GET /api/images/<id>` were unauthenticated and are now `@login_required`. Images still have no owner, so any logged-in user who knows an image_id (a uuid4) can read its metadata.

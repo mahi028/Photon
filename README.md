@@ -32,7 +32,7 @@ Photon is an autonomous, natural-language image processing studio. Upload any im
    ```bash
    docker-compose -f docker/docker-compose.yml up --build -d
    ```
-   _Photon is now running! Open `http://localhost:5050` in your browser._
+   _Photon is now running! Open `http://localhost:8889` in your browser._
 
 ### Option B: Local Setup
 
@@ -73,7 +73,7 @@ uv run waitress-serve --listen=0.0.0.0:80 src.backend.wsgi:app # on windows
 
 _Alternatively:_ `flask --app src/backend/app run --debug`
 
-Open `http://localhost:5000` in your browser.
+Open `http://localhost:8889` in your browser (the dev server; gunicorn/waitress use whatever `-b`/`--listen` you pass).
 
 ## MCP Server (use Photon from any LLM)
 
@@ -102,7 +102,12 @@ Each call acts as the key's owner, so results appear in that user's sessions. Ke
 claude mcp add photon -- uv run --directory /path/to/Photon --extra mcp python -m src.mcp_server
 ```
 
-Tools: `upload_image` (local path or URL), `create_session`, `attach_image`, `list_sessions`, `get_session`, `get_output`, `list_ops`, `validate_pipeline`, `run_pipeline`, `list_pipelines`, `get_pipeline`, `save_pipeline`. Tool results include small JPEG previews; full-resolution outputs stay in `volumes/outputs/` and are returned as paths.
+Tools: `upload_image`, `create_session`, `attach_image`, `detach_image`, `delete_session`, `list_sessions`, `get_session`, `get_output`, `download_output`, `list_ops`, `validate_pipeline`, `run_pipeline`, `list_pipelines`, `get_pipeline`, `save_pipeline`. Read-only tools carry `readOnlyHint` and the two destructive ones `destructiveHint`, so clients can auto-approve the former and prompt for the latter. `delete_session` also needs the session's exact title as `confirm_title`.
+
+Getting images in and out from a remote client:
+
+- **In:** `upload_image(data_base64=..., filename="scan.png")` works from anywhere. `url` must be a public http(s) address; loopback, private, link-local and similar addresses are refused, redirects included, and the same rule now applies to the web UI's URL upload (set `PHOTON_ALLOW_PRIVATE_URLS=1` to allow internal hosts). `path` reads the server's disk: always allowed over stdio, but over HTTP only inside directories listed in `PHOTON_MCP_PATH_ROOTS` (separated by `:`), and never inside `volumes/`.
+- **Out:** tool results include small JPEG previews. `download_output` returns the full-resolution file as an embedded resource, up to `PHOTON_MCP_MAX_DOWNLOAD_MB` (default 25).
 
 Scope is deliberately narrow: only trusted catalog ops (plus already-saved custom nodes) run. There is no `run_code` and no tool to save new custom nodes, since both execute arbitrary Python and the subprocess sandbox should not face prompt-injected code until the Docker executor ships. It shares `volumes/` and `sessions.db` with the web app, so both can run at once.
 
