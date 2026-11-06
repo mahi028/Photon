@@ -249,3 +249,32 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - Core logic is in `core/pipeline/publishing.py`, with no HTTP. The UI is a Public section on the Pipelines page plus Publish/Unpublish in the editor, and `/published/<id>?version=N` is a read-only editor view with a version picker, Run and Fork. MCP gets `list_pipelines(scope, query)`, `get_pipeline(published_id, version)`, `run_pipeline(published_id, version)`, and `publish_pipeline`, `unpublish_pipeline`, `fork_pipeline`.
 
 **Not yet.** Example input/output thumbnails on cards. Photon's own chat LLM doesn't see public pipelines. Composite nodes (pipeline as a node). Per-pipeline MCP tools. Docker isolation.
+
+## D-036 — Sandbox hardening before the container/VM executor
+
+**Context.** Shared pipelines (D-035) mean colleagues run each other's custom node code. The save-time AST check was trivially bypassable: `pathlib.Path(".env").read_text()`, `getattr(os, "sys"+"tem")`, and `np.load(..., allow_pickle=True)` all passed it. Also, the pipeline child imported `config.py`, whose `load_dotenv()` put every app secret into the child's environment.
+
+**Decision (defence in depth; not the final boundary).**
+- **Runtime guard** `core/sandbox/guard.py`, a PEP 578 audit hook installed in both children (the pipeline child after trusted imports, and inlined at the top of the run-code harness), before any user code:
+  - It denies process creation (subprocess, os.system/exec/spawn/posix_spawn/fork), signals, ctypes, unpickling (`pickle.find_class`), and network sockets.
+  - AF_UNIX connects are allowed only to the model sidecar socket.
+  - File opens may write only under the run's own dirs, and may read only Python's install, the repo's `src/`, the input and those dirs. Paths are realpath'd, so symlinks resolve to their targets. Filesystem mutations need every path inside write roots.
+  - `os.environ` is wiped to an allow-list.
+- **`PHOTON_NO_DOTENV=1`** in children skips `load_dotenv`.
+- **The model sidecar** is started by the parent; the child may connect to it but never spawn it.
+- **AST check** now also rejects:
+  - `getattr`/`setattr`/`delattr`/`globals`/`locals`/`vars`/`__builtins__`;
+  - dunder access outside a small allow-list, and frame/code attributes;
+  - `allow_pickle`, and `torch.load` without `weights_only=True`;
+  - fork/spawn/kill-style calls and relative imports;
+  - more explicit module blocks (pickle, marshal, gc, inspect, sys, shutil…).
+  - `strict_io=True` (custom node save, chat-inline nodes, publish) also rejects all file-I/O calls, since nodes get arrays, not files.
+
+**Verified.** 18 attack variants run directly in the pipeline child (bypassing the AST layer) are all denied, and decoy `.env`/db/upload files stay untouched. The stored custom nodes and LLM snippets show no new false positives. Publishing e2e: 42/42.
+
+**Known limits.**
+- C extensions do I/O without audit events (e.g. `cv2.imread`, which strict mode blocks by name; other C paths may exist).
+- Audit hooks are not a security boundary per PEP 578.
+- The sidecar socket accepts any command from the child.
+- `MODEL_IPC_DIR` is shared across runs.
+- Fix: the container/VM executor (Phase 2).

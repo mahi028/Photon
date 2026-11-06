@@ -14,9 +14,11 @@ from dotenv import load_dotenv
 
 from .core.sandbox.dep_sync import sync_from_pyproject
 
-# Load .env from project root
+# Load .env from project root — except in sandbox children (PHOTON_NO_DOTENV=1,
+# set by the executors), which must never hold the app's secrets.
 _root = Path(__file__).parent.parent.parent
-load_dotenv(_root / ".env")
+if os.getenv("PHOTON_NO_DOTENV") != "1":
+    load_dotenv(_root / ".env")
 
 # Auto-synced from pyproject.toml [project].dependencies at import time —
 # `uv add xyz` + restart makes a new library sandbox-importable, no manual edit.

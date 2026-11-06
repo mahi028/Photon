@@ -115,7 +115,7 @@ def _persist_inline_custom_nodes(graph: dict, user_id: str) -> tuple[dict, list[
         if "def node(" not in code:
             raise ValueError(f"Custom node '{name}' must define node(inputs, params).")
         try:
-            _check_ast_safety(code)
+            _check_ast_safety(code, strict_io=True)
         except (ASTSecurityError, SyntaxError) as e:
             raise ValueError(f"Custom node '{name}' rejected by sandbox policy: {e}")
 

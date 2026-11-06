@@ -82,7 +82,7 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "") -> dict:
     for cid in _used_custom_ids(graph):
         cn = own_customs[cid]                    # validate() guarantees presence
         try:
-            _check_ast_safety(cn["code"])
+            _check_ast_safety(cn["code"], strict_io=True)
         except (ASTSecurityError, SyntaxError) as e:
             raise PublishError(f"Custom node '{cn['name']}' is rejected by the sandbox policy: {e}")
         snapshot[cid] = _node_snapshot(cn)

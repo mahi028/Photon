@@ -235,7 +235,7 @@ def create_custom_node():
         return jsonify({"error": "ports must declare inputs and outputs"}), 400
 
     try:
-        _check_ast_safety(code)
+        _check_ast_safety(code, strict_io=True)
     except (ASTSecurityError, SyntaxError) as e:
         return jsonify({"error": f"Rejected by sandbox policy: {e}"}), 400
     if "def node(" not in code:

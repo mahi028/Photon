@@ -34,6 +34,15 @@ import numpy as np
 sys.path.insert(0, JOB["repo_root"])
 from src.backend.core.pipeline import runner  # noqa: E402
 from src.backend.core.pipeline.types import PortType, infer_type  # noqa: E402
+from src.backend.core.sandbox import guard  # noqa: E402
+from PIL import Image  # noqa: E402
+
+# Read the input while the process is still unrestricted-by-hook, then lock
+# down before any custom node code is compiled or run (D-036).
+_INPUT = np.asarray(Image.open(JOB["input_path"]).convert(JOB["input_mode"]))
+import src.backend.core.models.sidecar  # noqa: E402,F401  (model ops import it lazily)
+guard.install(read_roots=guard.default_read_roots() + JOB["read_roots"],
+              write_roots=JOB["write_roots"], unix_sockets=JOB["unix_sockets"])
 
 def _to_preview_array(value):
     """Best-effort conversion of any port value to a saveable uint8 image."""
@@ -50,13 +59,12 @@ def _to_preview_array(value):
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 def main():
-    from PIL import Image
     graph = JOB["graph"]
     custom_nodes = JOB["custom_nodes"]
     node_dir = Path(JOB["node_preview_dir"])
     node_dir.mkdir(parents=True, exist_ok=True)
 
-    img = np.asarray(Image.open(JOB["input_path"]).convert(JOB["input_mode"]))
+    img = _INPUT
 
     events = []
     previews = {}
@@ -104,6 +112,18 @@ except Exception:
 '''
 
 
+def _uses_model_ops(graph: dict) -> bool:
+    from . import registry
+    for n in graph.get("nodes") or []:
+        if n.get("op"):
+            try:
+                if registry.get_op(n["op"]).requires_model:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def run_pipeline_subprocess(
     graph: dict,
     input_path: str,
@@ -120,6 +140,21 @@ def run_pipeline_subprocess(
 
     scratch = Path(tempfile.mkdtemp(prefix="pipe_", dir=str(config.TMP_EXEC_DIR)))
     result_path = scratch / "result.json"
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(node_preview_dir).mkdir(parents=True, exist_ok=True)
+
+    # Model ops reach the sidecar over its Unix socket. Start it here, in the
+    # unrestricted parent: the guarded child may connect but never spawn.
+    unix_sockets: list[str] = []
+    if _uses_model_ops(graph) and config.MODEL_SIDECAR_ENABLED:
+        from ..models import sidecar
+        try:
+            sidecar.ensure_running()
+        except Exception:
+            pass                       # child reports the failure on the node
+        unix_sockets.append(str(config.MODEL_SIDECAR_SOCKET))
+        config.MODEL_IPC_DIR.mkdir(parents=True, exist_ok=True)
+
     job = {
         "repo_root": repo_root,
         "graph": graph,
@@ -129,6 +164,13 @@ def run_pipeline_subprocess(
         "output_dir": output_dir,
         "node_preview_dir": node_preview_dir,
         "result_path": str(result_path),
+        # Sandbox guard (core/sandbox/guard.py): reads beyond Python's own
+        # install are limited to the repo's src/ (lazy op imports); writes to
+        # this run's dirs. .env, sessions.db, other users' files: unreadable.
+        "read_roots": [str(config.ROOT_DIR / "src")],
+        "write_roots": [str(scratch), output_dir, node_preview_dir]
+                       + ([str(config.MODEL_IPC_DIR)] if unix_sockets else []),
+        "unix_sockets": unix_sockets,
     }
     script = scratch / "run.py"
     script.write_text(f"JOB = {json.dumps(job)}\n{_CHILD}", encoding="utf-8")
@@ -143,6 +185,8 @@ def run_pipeline_subprocess(
         "MKL_NUM_THREADS": blas,
         "VECLIB_MAXIMUM_THREADS": blas,
         "NUMEXPR_NUM_THREADS": blas,
+        "PHOTON_NO_DOTENV": "1",
+        "MODEL_SIDECAR_ENABLED": "1" if config.MODEL_SIDECAR_ENABLED else "0",
     }
 
     preexec_fn = None

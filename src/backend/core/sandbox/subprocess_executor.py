@@ -54,12 +54,68 @@ _BLOCKED_IMPORT_PREFIXES: frozenset[str] = frozenset(
         "cffi",
         "importlib",
         "pkgutil",
+        "pickle",
+        "marshal",
+        "shelve",
+        "dill",
+        "gc",
+        "inspect",
+        "sys",
+        "builtins",
+        "pty",
+        "signal",
+        "shutil",
+        "tempfile",
+        "glob",
+        "mmap",
+        "resource",
     }
 )
 
-# Dangerous builtins
+# Dangerous builtins / introspection names (any Load reference is rejected:
+# getattr & co. are how string-built attribute names dodge the checks below).
 _BLOCKED_BUILTINS: frozenset[str] = frozenset(
-    {"eval", "exec", "__import__", "compile", "open", "breakpoint"}
+    {"eval", "exec", "__import__", "compile", "open", "breakpoint",
+     "getattr", "setattr", "delattr", "globals", "locals", "vars",
+     "__builtins__", "__loader__", "__spec__"}
+)
+
+# Calls blocked by attribute name, whatever the object (os.system, os.fork...).
+_BLOCKED_CALL_ATTRS: frozenset[str] = frozenset(
+    {"system", "popen", "exec", "execl", "execle", "execlp", "execlpe", "execv",
+     "execve", "execvp", "execvpe", "spawnl", "spawnle", "spawnlp", "spawnlpe",
+     "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp",
+     "fork", "forkpty", "kill", "killpg", "startfile", "putenv"}
+)
+
+# Dunder attributes allowed in attribute access; every other __x__ (e.g.
+# __class__, __subclasses__, __globals__, __dict__, __reduce__) is rejected —
+# they are the classic object-graph walk out of a Python sandbox.
+_ALLOWED_DUNDER_ATTRS: frozenset[str] = frozenset(
+    {"__init__", "__name__", "__doc__", "__len__", "__call__", "__enter__",
+     "__exit__", "__iter__", "__next__", "__getitem__", "__setitem__",
+     "__contains__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+     "__hash__", "__repr__", "__str__", "__add__", "__sub__", "__mul__",
+     "__truediv__", "__array__", "__version__"}
+)
+# Frame / generator / code internals: same reason, not dunders.
+_BLOCKED_ATTRS: frozenset[str] = frozenset(
+    {"f_globals", "f_locals", "f_builtins", "f_back", "f_code", "gi_frame", "gi_code",
+     "cr_frame", "cr_code", "ag_frame", "tb_frame", "tb_next", "co_code", "func_globals"}
+)
+
+# Custom pipeline nodes receive arrays and return arrays; they never need the
+# filesystem. strict_io=True (used for custom nodes) rejects file-I/O calls by
+# attribute name. Run-code snippets read input_path and write output_dir, so
+# they keep these (the runtime guard still confines them to those paths).
+_FILE_IO_ATTRS: frozenset[str] = frozenset(
+    {"open", "read_text", "read_bytes", "write_text", "write_bytes", "imread",
+     "imreadmulti", "imwrite", "imsave", "imdecode", "load", "loads", "save", "savez",
+     "savez_compressed", "fromfile", "tofile", "loadtxt", "savetxt", "genfromtxt",
+     "memmap", "unlink", "rmdir", "mkdir", "makedirs", "rename", "replace", "remove",
+     "removedirs", "touch", "symlink_to", "hardlink_to", "chmod", "listdir", "scandir",
+     "walk", "glob", "rglob", "iterdir", "VideoCapture", "VideoWriter", "FileStorage",
+     "TiffFile", "TiffWriter"}
 )
 
 # Allowed top-level module names (whitelist — anything else is blocked).
@@ -67,18 +123,30 @@ _BLOCKED_BUILTINS: frozenset[str] = frozenset(
 # library via `uv add xyz` + restart, not by editing this set.
 _ALLOWED_IMPORT_TOPS: frozenset[str] = config.SANDBOX_ALLOWED_IMPORTS
 
+# The runtime guard's source, inlined into the run-code harness (the child
+# runs with PYTHONPATH="" and can't import the repo).
+_GUARD_SOURCE: str = (Path(__file__).parent / "guard.py").read_text(encoding="utf-8")
+
 
 class ASTSecurityError(Exception):
     """Raised when AST check rejects the submitted code."""
 
 
-def _check_ast_safety(code: str) -> None:
+def _is_true(node) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _check_ast_safety(code: str, *, strict_io: bool = False) -> None:
     """Parse code and raise ASTSecurityError if any forbidden construct is found.
 
-    Checks:
-    1. Blocked builtins (eval, exec, __import__, compile, open, breakpoint)
-    2. Import of blocked modules
-    3. Import of modules not in the allowlist
+    First layer only: static checks on Python are bypassable, so every child
+    also runs under the runtime guard (guard.py, D-036). Checks:
+    1. Blocked builtins / introspection names (eval, exec, getattr, globals...)
+    2. Blocked call attributes (os.system, fork, spawn...)
+    3. Dunder / frame attribute access outside a small allowlist
+    4. Unpickling: allow_pickle=True anywhere; torch.load without weights_only=True
+    5. Import of blocked modules, or of modules not in the allowlist
+    6. strict_io (custom nodes): any file-I/O call
 
     Raises:
         ASTSecurityError: with a descriptive message if any check fails.
@@ -87,19 +155,39 @@ def _check_ast_safety(code: str) -> None:
     tree = ast.parse(code, mode="exec")
 
     for node in ast.walk(tree):
-        # Check function/attribute calls for dangerous builtins
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in _BLOCKED_BUILTINS:
                 raise ASTSecurityError(
                     f"Use of '{node.func.id}' is blocked by sandbox policy."
                 )
+            for kw in node.keywords:
+                if kw.arg == "allow_pickle" and not (isinstance(kw.value, ast.Constant)
+                                                     and kw.value.value is False):
+                    raise ASTSecurityError("allow_pickle is blocked by sandbox policy "
+                                           "(unpickling runs arbitrary code).")
             if isinstance(node.func, ast.Attribute):
-                # e.g. os.system, os.popen
                 attr = node.func.attr
-                if attr in {"system", "popen", "execv", "execvp", "execve", "execvpe", "exec"}:
+                if attr in _BLOCKED_CALL_ATTRS:
                     raise ASTSecurityError(
                         f"Call to '{attr}' is blocked by sandbox policy."
                     )
+                if attr == "load" and isinstance(node.func.value, ast.Name) \
+                        and node.func.value.id == "torch" \
+                        and not any(kw.arg == "weights_only" and _is_true(kw.value)
+                                    for kw in node.keywords):
+                    raise ASTSecurityError("torch.load needs weights_only=True "
+                                           "(unpickling runs arbitrary code).")
+                if strict_io and attr in _FILE_IO_ATTRS:
+                    raise ASTSecurityError(
+                        f"File I/O ('{attr}') is not allowed in custom nodes: they "
+                        "receive arrays via `inputs` and return arrays."
+                    )
+
+        if isinstance(node, ast.Attribute):
+            a = node.attr
+            if (a.startswith("__") and a.endswith("__") and a not in _ALLOWED_DUNDER_ATTRS) \
+                    or a in _BLOCKED_ATTRS:
+                raise ASTSecurityError(f"Access to '.{a}' is blocked by sandbox policy.")
 
         # Check Name references to blocked builtins
         if isinstance(node, ast.Name) and node.id in _BLOCKED_BUILTINS:
@@ -114,6 +202,8 @@ def _check_ast_safety(code: str) -> None:
                 names = [alias.name for alias in node.names]
             else:
                 names = [node.module] if node.module else []
+                if node.level:
+                    raise ASTSecurityError("Relative imports are blocked by sandbox policy.")
 
             for name in names:
                 if name is None:
@@ -142,6 +232,12 @@ _HARNESS_TEMPLATE = dedent(
     import sys
     import time
     import traceback as _tb
+
+    # ---- sandbox guard (core/sandbox/guard.py, inlined) ----
+    exec(compile({guard_source!r}, "<sandbox-guard>", "exec"), _g := {{"__name__": "_sandbox_guard"}})
+    _g["install"](read_roots=_g["default_read_roots"]() + [{input_path!r}],
+                  write_roots=[{output_dir!r}, {scratch_dir!r}])
+    del _g
 
     # ---- user code ----
     {user_code}
@@ -225,6 +321,8 @@ class SubprocessExecutor(Executor):
             user_code=code,
             input_path=input_path,
             output_dir=output_dir,
+            scratch_dir=str(scratch_dir),
+            guard_source=_GUARD_SOURCE,
         )
         script_path.write_text(harness, encoding="utf-8")
 
@@ -246,6 +344,7 @@ class SubprocessExecutor(Executor):
             "MKL_NUM_THREADS": blas_threads,
             "VECLIB_MAXIMUM_THREADS": blas_threads,
             "NUMEXPR_NUM_THREADS": blas_threads,
+            "PHOTON_NO_DOTENV": "1",
         }
 
         # Step 4: Resource limits (POSIX only)
