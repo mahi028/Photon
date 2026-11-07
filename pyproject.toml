@@ -47,3 +47,14 @@ extraPaths = ["."]
 executionEnvironments = [
   { root = "." }
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore:datetime.datetime.utcnow:DeprecationWarning"]
+markers = ["slow: spawns sandbox subprocesses or an MCP server (deselect with -m 'not slow')"]

@@ -75,6 +75,29 @@ _Alternatively:_ `flask --app src/backend/app run --debug`
 
 Open `http://localhost:8889` in your browser (the dev server; gunicorn/waitress use whatever `-b`/`--listen` you pass).
 
+## Accounts
+
+Sign-up is controlled by `PHOTON_SIGNUP` (`open`, `invite` or `closed`) plus optional email/domain allow-lists; see `.env.example`. With `open` and no allow-list, anyone who can reach the server can create an account and run code, and the app logs a warning at startup. Admin CLI:
+
+```bash
+uv run python -m src.backend.cli user list
+uv run python -m src.backend.cli user add alice alice@lab.org     # prompts for a password
+uv run python -m src.backend.cli user passwd alice
+```
+
+## Sandbox
+
+Custom nodes and code snippets run in a resource-limited subprocess with a save-time AST check and a runtime guard (`PHOTON_SANDBOX=local`, the default). For real isolation, including GPU custom nodes, run the gVisor sandbox worker and set `PHOTON_SANDBOX=remote`: see [`docker/sandbox-worker/README.md`](docker/sandbox-worker/README.md).
+
+## Tests
+
+```bash
+uv run pytest                 # everything (~2 min: sandbox children, an MCP server, a sandbox worker)
+uv run pytest -m "not slow"   # fast unit/route tests only
+```
+
+Tests use a throwaway `volumes/` (`PHOTON_VOLUMES_DIR`) and never read `.env`.
+
 ## MCP Server (use Photon from any LLM)
 
 Photon's pipeline layer is also exposed as an [MCP](https://modelcontextprotocol.io) server, so Claude Code, Claude Desktop, or any MCP client can drive it directly. The client LLM plans the work: it reads the op catalog, writes a pipeline graph, validates it, runs it, looks at the previews and iterates. Photon's own LLM loop is not used.

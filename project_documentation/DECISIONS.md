@@ -278,3 +278,52 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - The sidecar socket accepts any command from the child.
 - `MODEL_IPC_DIR` is shared across runs.
 - Fix: the container/VM executor (Phase 2).
+
+## D-037 — Who gets in, and who sees what
+
+**Context.** D-035's trust model ("every account is a trusted colleague") rested on three things that weren't true:
+- Sign-up was open to anyone who could reach the server, with no email verification.
+- `/previews/<path>` served any file under `volumes/` without login. That included `sessions.db`, with every password hash and API-key hash. `/outputs/<path>` had the same problem, and `/api/llm/model` let anonymous users change the global model.
+- Any user who knew an `image_id` could attach another user's image to their own session.
+
+**Decision.**
+- **Sign-up policy** (`core/auth/signup_policy.py`), set by env vars:
+  - `PHOTON_SIGNUP=open|invite|closed`.
+  - Optional `PHOTON_SIGNUP_ALLOWED_DOMAINS` / `PHOTON_SIGNUP_ALLOWED_EMAILS`. Google sign-up must also have `email_verified`. Password sign-up can't prove the email, which is why `invite` exists: it requires `PHOTON_SIGNUP_INVITE_CODE`.
+  - Existing accounts can always log in.
+  - Startup logs a warning for open mode with no allow-list.
+  - `python -m src.backend.cli user add|list|passwd` creates accounts for `closed` mode.
+- **File routes.** Both now require login. `/previews/uploads/<file>` serves only a registered image's file or preview, to someone who may access that image. `/outputs/<session_id>/<file>` serves only under a session you own. Everything else returns 404. `llm_routes` and `example_routes` now require login.
+- **Image ownership.** New column `images.owner_id`, set on upload (web, MCP) and on clone. `store.user_can_access_image` means: you uploaded it, or it's listed in one of your sessions (this covers pre-migration rows and share clones). It's enforced on metadata, preview, session create and attach, in both web and MCP.
+- **Session run status across processes.**
+  - `store.claim_session_run` is an atomic `UPDATE ... WHERE status != 'running'`, and `SessionManager.try_start_run` replaces check-then-set. Two processes (Flask, MCP) can no longer both start a run on one session.
+  - `save_session` no longer writes `status`, so a stale cached copy can't clobber another process's run.
+  - The cache compares `(updated_at, status)`.
+  - A `running` claim older than an hour (`status_at`) is treated as abandoned.
+  - The LLM loop and manual run release the session in `finally`. The nested pipeline run inside the LLM loop no longer flips the session to idle mid-loop (`manage_status=False`).
+- **Thread caps** (`core/sandbox/limits.py`), shared by all children. `OPENCV_FOR_THREADS_NUM` and the TF pool vars join the BLAS ones. Without them, cv2 failed with "Can't spawn new thread" on the 256-core box under RLIMIT_AS.
+
+**Verified.** `tests/`: an anonymous request for `sessions.db` gets 404. A second user gets 404 on another user's image metadata, preview, original, outputs, attach and session create. Cross-process claims work with real child processes. Fresh-DB migrations are ordered (a test caught an `ALTER TABLE images` that ran before the table existed).
+
+## D-038 — Remote sandbox worker (gVisor, optional GPU), ready to deploy
+
+**Context.** The D-036 guard is a speed bump. Custom nodes may need torch/tensorflow on a GPU, which rules out WASM. The dev box is itself a container (no KVM, no Docker), so Firecracker and runsc can't run here.
+
+**Decision.**
+- One switch, `core/sandbox/backend.py`: `PHOTON_SANDBOX=local|remote`. `get_executor()` handles run-code and `run_pipeline()` handles graphs. Routes, the LLM loop and MCP call only these.
+- **Remote** (`core/sandbox/remote.py`) sends the job and input file over HTTP with a bearer token to the worker (`src/sandbox_worker/server.py`). The worker runs the same local executors (AST, rlimits, guard) in a scratch dir. It returns a zip with `result.json` and outputs, with paths relative. The client validates every entry (no absolute paths, no `..`, no links, count and size caps) before extracting into the caller's dirs.
+- **Worker image** `docker/sandbox-worker/`:
+  - Slim Python with the cu121 wheels; it holds only code, with no `.env`, `volumes/` or frontend.
+  - Compose sets `runtime: runsc`, read-only root, tmpfs scratch, all caps dropped, `no-new-privileges`, pids/mem/cpu limits and an optional GPU via nvproxy.
+  - `SANDBOX_MEMORY_LIMIT_GB=0` disables RLIMIT_AS, which CUDA can't live under; the container limit caps memory instead.
+  - Egress is blocked with a `DOCKER-USER` firewall rule (see the README).
+- Removed the `DockerExecutor` stub and `config.EXECUTOR_CLASS`.
+
+**Verified.** Without gVisor, against a localhost worker: protocol, auth, zip-traversal rejection, the app's run route end to end, and the full guard attack suite through the worker (`PHOTON_SANDBOX=remote pytest tests/test_sandbox.py`: 34 passed).
+
+**Not verified.** Running under `runsc`, GPU via nvproxy, model ops on the worker's own sidecar. Checklist: `docker/sandbox-worker/README.md`.
+
+## D-039 — Shared pipelines in the chat loop; async MCP runs
+
+- The chat system prompt lists up to 30 published pipelines (id, title, version, owner, op chain, short description). Each entry is fenced as user-written data. The LLM can answer with `{"response_type": "pipeline", "pipeline": {"published_id": ..., "version"?: N}}`. The loop resolves the frozen snapshot (`publishing.resolve_for_run`) and runs it with provenance. An unknown id becomes a feedback turn.
+- MCP `run_pipeline(wait=False)` returns a `job_id` immediately; `get_run(job_id)` returns progress, then the usual summary and previews. Jobs live in the MCP process's memory for an hour after they finish, and only the owner can see them. Outputs are saved to the session either way.
