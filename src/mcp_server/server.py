@@ -600,13 +600,15 @@ def get_pipeline(pipeline_id: str | None = None, published_id: str | None = None
 
 
 @_tool()
-def publish_pipeline(pipeline_id: str, changelog: str = "") -> dict:
+def publish_pipeline(pipeline_id: str, changelog: str = "", thumbnail: bool = True) -> dict:
     """Publish one of your saved pipelines to everyone on this Photon instance
     as its next immutable version (graph + the code of every custom node it
     uses are frozen). Re-publishing the same pipeline adds a version; if
-    nothing changed, no new version is made. Must validate first."""
+    nothing changed, no new version is made. Must validate first.
+    thumbnail=True shows your most recent output of this exact graph on the
+    public card (visible to everyone); False removes the card image."""
     try:
-        return publishing.publish(_uid(), pipeline_id, changelog)
+        return publishing.publish(_uid(), pipeline_id, changelog, thumbnail=thumbnail)
     except publishing.PublishError as e:
         if e.issues:
             return {"published": False, "error": str(e), "issues": e.issues}

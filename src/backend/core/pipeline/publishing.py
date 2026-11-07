@@ -26,15 +26,22 @@ No HTTP here: used by api/pipeline_routes.py and the MCP server.
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
+from ...config import config
 from ..sandbox.subprocess_executor import ASTSecurityError, _check_ast_safety
 from ..session import store
 from . import runner
 
 MAX_CHANGELOG = 500
+THUMB_LONG_EDGE = 480
+
+log = logging.getLogger(__name__)
 
 
 class PublishError(Exception):
@@ -59,11 +66,16 @@ def _owner_label(pub: dict) -> str:
     return pub.get("owner_display_name") or pub.get("owner_username") or "unknown"
 
 
-def publish(user_id: str, pipeline_id: str, changelog: str = "") -> dict:
+def publish(user_id: str, pipeline_id: str, changelog: str = "",
+            thumbnail: bool = True) -> dict:
     """Publish (or re-publish) one of the user's own pipelines.
 
-    Returns {published_id, version, created} where created=False means the
-    snapshot was identical to the latest version and nothing new was written.
+    thumbnail: show the author's most recent output of this exact graph on the
+    public card (see set_thumbnail). False removes any card image.
+
+    Returns {published_id, version, created, thumbnail} where created=False
+    means the snapshot was identical to the latest version and nothing new was
+    written; thumbnail says whether the card now has an image.
     """
     p = store.load_pipeline(pipeline_id)
     if not p or p["user_id"] != user_id:
@@ -95,8 +107,10 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "") -> dict:
         unchanged = (latest["graph"] == graph and latest["custom_nodes"] == snapshot
                      and latest["title"] == title and latest["description"] == description)
         if unchanged and not existing["unpublished_at"]:
-            return {"published_id": existing["published_id"],
-                    "version": existing["latest_version"], "created": False}
+            pid = existing["published_id"]
+            return {"published_id": pid, "version": existing["latest_version"], "created": False,
+                    "thumbnail": set_thumbnail(user_id, pid, graph) if thumbnail
+                    else _remove_thumbnail(pid)}
         published_id = existing["published_id"]
     else:
         published_id = uuid.uuid4().hex
@@ -104,7 +118,88 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "") -> dict:
     version = store.add_published_version(
         published_id, user_id, pipeline_id, title, description, graph, snapshot,
         (changelog or "").strip()[:MAX_CHANGELOG], datetime.utcnow().isoformat())
-    return {"published_id": published_id, "version": version, "created": True}
+    has_thumb = (set_thumbnail(user_id, published_id, graph, drop_stale=True) if thumbnail
+                 else _remove_thumbnail(published_id))
+    return {"published_id": published_id, "version": version, "created": True,
+            "thumbnail": has_thumb}
+
+
+# --- card thumbnails (#8) ---------------------------------------------------
+# The card shows the author's own latest output of the published graph: real
+# data, no extra run. Copied (downscaled) out of the session so it survives the
+# session being deleted and never exposes the session's files. Served by
+# GET /api/published/<id>/thumbnail to anyone who can see the publication.
+
+def _thumb_path(published_id: str) -> Path:
+    return config.VOLUMES_DIR / "published_thumbs" / f"{published_id}.jpg"
+
+
+def _graph_key(graph: Any) -> Optional[str]:
+    """Canonical form for "same pipeline": node ids/ops/params + edges, ignoring
+    editor layout (pos) and key order."""
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+        return None
+    nodes = sorted(({k: v for k, v in n.items() if k != "pos"} for n in graph["nodes"]
+                    if isinstance(n, dict)), key=lambda n: str(n.get("id")))
+    edges = sorted(graph.get("edges") or [], key=lambda e: json.dumps(e, sort_keys=True))
+    return json.dumps({"nodes": nodes, "edges": edges}, sort_keys=True)
+
+
+def _output_graph(code: str) -> Any:
+    """Pipeline outputs store the graph as provenance: either the graph itself
+    or {published_id, version, ..., graph}. Code-run outputs aren't JSON."""
+    try:
+        obj = json.loads(code)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(obj, dict) and "nodes" not in obj and isinstance(obj.get("graph"), dict):
+        return obj["graph"]
+    return obj
+
+
+def find_latest_output(user_id: str, graph: dict) -> Optional[Path]:
+    key = _graph_key(graph)
+    if not key:
+        return None
+    for o in store.recent_outputs_for_user(user_id):
+        if _graph_key(_output_graph(o["code"])) == key and Path(o["path"]).is_file():
+            return Path(o["path"])
+    return None
+
+
+def set_thumbnail(user_id: str, published_id: str, graph: dict, drop_stale: bool = False) -> bool:
+    """Refresh the card image from the author's latest matching output.
+    No match: keep the current image, unless drop_stale (a new version whose
+    graph the old image no longer shows). Returns whether an image exists."""
+    from ..image.thumbnail import generate_thumbnail
+    dest = _thumb_path(published_id)
+    src = find_latest_output(user_id, graph)
+    if src is None:
+        if drop_stale:
+            _remove_thumbnail(published_id)
+        return dest.is_file()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp.jpg")
+    try:
+        generate_thumbnail(src, tmp, max_long_edge=THUMB_LONG_EDGE)
+        tmp.replace(dest)
+    except Exception as e:                      # a bad output must not fail publishing
+        log.warning("thumbnail for %s from %s failed: %s", published_id, src, e)
+        tmp.unlink(missing_ok=True)
+    return dest.is_file()
+
+
+def _remove_thumbnail(published_id: str) -> bool:
+    _thumb_path(published_id).unlink(missing_ok=True)
+    return False
+
+
+def thumbnail_for(viewer_id: str, published_id: str) -> Optional[Path]:
+    """The card image path if the viewer may see the publication."""
+    if not _visible(store.load_published_pipeline(published_id), viewer_id):
+        return None
+    p = _thumb_path(published_id)
+    return p if p.is_file() else None
 
 
 def unpublish(user_id: str, published_id: str) -> bool:
@@ -131,6 +226,10 @@ def list_public(viewer_id: str, query: str | None = None) -> list[dict]:
     for p in pubs:
         p["owner"] = _owner_label(p)
         p["is_mine"] = p["owner_id"] == viewer_id
+        t = _thumb_path(p["published_id"])
+        # mtime busts the browser cache when a re-publish replaces the image
+        p["thumbnail_url"] = (f"/api/published/{p['published_id']}/thumbnail?v={int(t.stat().st_mtime)}"
+                              if t.is_file() else None)
     return pubs
 
 

@@ -327,3 +327,16 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 
 - The chat system prompt lists up to 30 published pipelines (id, title, version, owner, op chain, short description). Each entry is fenced as user-written data. The LLM can answer with `{"response_type": "pipeline", "pipeline": {"published_id": ..., "version"?: N}}`. The loop resolves the frozen snapshot (`publishing.resolve_for_run`) and runs it with provenance. An unknown id becomes a feedback turn.
 - MCP `run_pipeline(wait=False)` returns a `job_id` immediately; `get_run(job_id)` returns progress, then the usual summary and previews. Jobs live in the MCP process's memory for an hour after they finish, and only the owner can see them. Outputs are saved to the session either way.
+
+## D-040 — Card thumbnails for published pipelines; chat cards for shared runs
+
+**Thumbnails (#8).**
+- The image is the author's own latest output of the published graph. That is real data, and no extra run is needed. Other users' runs are never used, since their data isn't the author's to share.
+- "Same graph" means node ids, ops, params and edges match; editor `pos` and key order are ignored. Pipeline outputs already store the graph as provenance (`outputs.code`), so this needs no schema change.
+- On publish, the image is copied into `volumes/published_thumbs/<published_id>.jpg`, downscaled to 480 px on the long edge. It is copied rather than referenced so it survives the session being deleted and never points into session files.
+- It is served by `GET /api/published/<id>/thumbnail`, under the same visibility rule as the publication.
+- The publish dialog has a checkbox, on by default, that says the image is visible to everyone; MCP `publish_pipeline(thumbnail=)` does the same. Unchecking it removes the image.
+- Re-publishing an unchanged pipeline refreshes the image. A new version with no matching output drops the old image, because that image no longer shows what the pipeline does.
+- Cards without an image show the op chain.
+
+**Chat cards for shared runs.** Once the chat loop has resolved a `published_id`, the stored message is the resolved graph plus `published: {published_id, version, title, owner}`, and the UI gets a `pipeline_resolved` event. The card's "Save" becomes a Fork, which imports the snapshot's custom nodes into the user's library. "Open" goes to the read-only `/published/<id>?version=N`. A plain save would reference custom nodes the user doesn't own.

@@ -425,21 +425,22 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       }
       const pub = this.publication;
       const next = pub ? `v${pub.latest_version + 1}` : 'v1';
-      const changelog = await window.ui.prompt({
+      const answer = await window.ui.prompt({
         title: `Publish ${next}`,
         message: 'Everyone on this Photon instance will be able to run and fork this version, including the code of any custom nodes it uses. Published versions never change.',
         label: pub ? 'What changed?' : 'Notes (optional)',
         placeholder: pub ? 'e.g. tuned the threshold for low-contrast scans' : '',
         multiline: true,
         confirmText: 'Publish',
+        checkbox: {label: 'Show my latest output of this pipeline as the card image (visible to everyone)', checked: true},
       });
-      if (changelog === null) return;
+      if (answer === null) return;
       this.publishing = true;
       try {
         const res = await fetch(`/api/pipelines/${this.pipelineId}/publish`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({changelog}),
+          body: JSON.stringify({changelog: answer.value, thumbnail: answer.checked}),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -448,8 +449,10 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
           return;
         }
         this.publication = {published_id: data.published_id, latest_version: data.version, unpublished: false};
-        this._toast(data.created ? `Published v${data.version}.` : `No changes since v${data.version}; nothing new published.`,
-                    data.created ? 'success' : 'info');
+        let note = data.created ? `Published v${data.version}.` : `No changes since v${data.version}; nothing new published.`;
+        if (answer.checked && !data.thumbnail) note += ' No card image yet: run this pipeline once, then publish again.';
+        else if (answer.checked && !data.created) note += ' Card image refreshed.';
+        this._toast(note, data.created ? 'success' : 'info');
       } finally {
         this.publishing = false;
       }

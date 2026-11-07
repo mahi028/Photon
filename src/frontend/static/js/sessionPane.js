@@ -205,6 +205,11 @@ function sessionPane(sess) {
         }
 
         // --- pipeline events (v3 P2) ---
+        if (event.event === 'pipeline_resolved') {
+          // LLM picked a shared pipeline: swap the {published_id} stub for its nodes
+          const msg = this._lastPipelineMessage();
+          if (msg) msg.pipeline = event.pipeline;
+        }
         if (event.event === 'pipeline_invalid') {
           const msg = this._lastPipelineMessage();
           if (msg) msg.pipelineIssues = event.issues || [];
@@ -314,6 +319,7 @@ function sessionPane(sess) {
 
     async savePipelineToLibrary(msg) {
       if (!msg.pipeline || msg.savingPipeline) return;
+      if (msg.pipeline.published) return this._forkShared(msg);
       msg.savingPipeline = true;
       try {
         const title = await window.ui.prompt({title: 'Save pipeline', label: 'Name', value: 'LLM pipeline', confirmText: 'Save', required: true, maxLength: 120});
@@ -334,7 +340,37 @@ function sessionPane(sess) {
       }
     },
 
+    async _forkShared(msg) {
+      // A shared pipeline's custom nodes live in its published snapshot, not in
+      // this user's library, so a plain save would reference nodes they don't
+      // have. Fork instead: it imports those nodes into the library.
+      const pub = msg.pipeline.published;
+      msg.savingPipeline = true;
+      try {
+        const res = await fetch(`/api/published/${pub.published_id}/fork`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({version: pub.version}),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Fork failed');
+        msg.savedPipelineId = data.pipeline_id;
+        window.ui.toast('Forked into your pipelines.', 'success');
+        return data.pipeline_id;
+      } catch (e) {
+        window.ui.toast('Could not fork pipeline: ' + e.message, 'error');
+      } finally {
+        msg.savingPipeline = false;
+      }
+    },
+
     async openPipelineInEditor(msg) {
+      const pub = msg.pipeline?.published;
+      if (pub && !msg.savedPipelineId) {
+        // read-only view of the exact version that ran; it has its own Fork button
+        window.location.href = `/published/${pub.published_id}?version=${pub.version}`;
+        return;
+      }
       // Editor works on saved pipelines, so save first if needed, then jump.
       const id = msg.savedPipelineId || await this.savePipelineToLibrary(msg);
       if (id) window.location.href = `/pipelines/${id}`;

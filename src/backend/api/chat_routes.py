@@ -264,6 +264,7 @@ def _llm_loop_body(session_id: str, user_prompt: str, claimed: list) -> None:
 
             graph = llm_result.pipeline or {}
             run_customs = run_provenance = None
+            shared = None          # set when the LLM picked a published pipeline
             if graph.get("published_id"):
                 # A shared pipeline: run its frozen snapshot (D-035), no edits.
                 from ..core.pipeline import publishing
@@ -280,6 +281,13 @@ def _llm_loop_body(session_id: str, user_prompt: str, claimed: list) -> None:
                                 "your own pipeline from catalog ops."))
                     last_error = str(e)
                     continue
+                # Stored on the message (not passed to the runner) so the chat
+                # card shows the resolved nodes and opens/forks the publication
+                # instead of saving a copy whose snapshot custom nodes aren't
+                # in the user's library.
+                shared = {k: run_provenance[k] for k in ("published_id", "version", "title", "owner")}
+                _push_event(session_id, {"event": "pipeline_resolved",
+                                         "pipeline": {**graph, "published": shared}})
             try:
                 graph, saved_customs = _persist_inline_custom_nodes(graph, sess.user_id)
             except ValueError as e:
@@ -297,7 +305,7 @@ def _llm_loop_body(session_id: str, user_prompt: str, claimed: list) -> None:
             issues = pipeline_runner.validate(graph, custom_nodes=customs)
             if issues:
                 issue_dicts = [i.to_dict() for i in issues]
-                assistant_msg.pipeline = graph
+                assistant_msg.pipeline = {**graph, "published": shared} if shared else graph
                 manager.add_message(session_id, assistant_msg)
                 _push_event(session_id, {"event": "pipeline_invalid", "attempt": attempt,
                                          "issues": issue_dicts})
@@ -307,7 +315,7 @@ def _llm_loop_body(session_id: str, user_prompt: str, claimed: list) -> None:
                 last_error = "; ".join(i["message"] for i in issue_dicts[:3])
                 continue
 
-            assistant_msg.pipeline = graph
+            assistant_msg.pipeline = {**graph, "published": shared} if shared else graph
             assistant_msg.was_executed = True
             manager.add_message(session_id, assistant_msg)
             turn_index = assistant_msg.turn_index

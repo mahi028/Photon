@@ -40,6 +40,14 @@
             </template>
           </label>
         </template>
+
+        <template x-if="$store.ui.dialog.checkbox">
+          <label class="flex items-start gap-2 text-sm text-gray-300 cursor-pointer select-none">
+            <input type="checkbox" x-model="$store.ui.dialog.checkbox.checked"
+                   class="mt-0.5 rounded border-gray-600 bg-gray-950 text-indigo-500 focus:ring-indigo-500" />
+            <span x-text="$store.ui.dialog.checkbox.label"></span>
+          </label>
+        </template>
       </div>
 
       <div class="flex justify-end gap-2 px-6 py-4 border-t border-gray-800 shrink-0">

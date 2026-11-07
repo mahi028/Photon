@@ -64,3 +64,9 @@ def test_chat_runs_shared_pipeline(make_user, upload, monkeypatch):
     assert any("Shared pipeline not available" in (msg.message or "") for msg in sess.llm_conversation)
     prov = json.loads(sess.outputs[-1].code)
     assert prov["published_id"] == pub and prov["version"] == 1
+    # #2: the chat card carries the resolved nodes + which publication ran,
+    # so the UI opens/forks it instead of saving a copy
+    ran = [msg for msg in sess.llm_conversation if msg.pipeline and msg.was_executed][-1]
+    assert ran.pipeline["published"] == {"published_id": pub, "version": 1,
+                                         "title": "Grayscale it", "owner": ran.pipeline["published"]["owner"]}
+    assert [n["op"] for n in ran.pipeline["nodes"]] == ["to_grayscale"]

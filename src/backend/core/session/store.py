@@ -895,3 +895,17 @@ def list_users() -> List[Dict[str, Any]]:
 def set_user_password(user_id: str, password_hash: str) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", (password_hash, user_id))
+
+
+def recent_outputs_for_user(user_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """A user's newest outputs across their sessions: {path, code, produced_at}.
+    `code` is the provenance (for pipeline runs, the graph JSON)."""
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT o.path, o.code, o.produced_at
+            FROM outputs o JOIN sessions s ON s.session_id = o.session_id
+            WHERE s.user_id = ?
+            ORDER BY o.produced_at DESC, o.id DESC
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+        return [dict(r) for r in rows]

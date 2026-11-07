@@ -167,7 +167,8 @@ def publish_pipeline(pipeline_id: str):
     """Publish the saved state of one of your pipelines as its next version."""
     data = request.get_json(silent=True) or {}
     try:
-        res = publishing.publish(get_current_user_id(), pipeline_id, data.get("changelog") or "")
+        res = publishing.publish(get_current_user_id(), pipeline_id, data.get("changelog") or "",
+                                 thumbnail=data.get("thumbnail", True) is not False)
     except publishing.PublishError as e:
         return _publish_error(e)
     return jsonify(res), 201 if res["created"] else 200
@@ -187,6 +188,19 @@ def get_published(published_id: str):
     if not d:
         return jsonify({"error": "Published pipeline not found"}), 404
     return jsonify(d), 200
+
+
+@pipeline_bp.route("/published/<published_id>/thumbnail", methods=["GET"])
+@login_required
+def published_thumbnail(published_id: str):
+    """Card image: the author's latest output of the published graph (#8)."""
+    from flask import send_file
+    path = publishing.thumbnail_for(get_current_user_id(), published_id)
+    if not path:
+        return jsonify({"error": "No thumbnail"}), 404
+    resp = send_file(path, mimetype="image/jpeg", max_age=3600)
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    return resp
 
 
 @pipeline_bp.route("/published/<published_id>/unpublish", methods=["POST"])

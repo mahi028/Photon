@@ -17,7 +17,7 @@
 
 document.addEventListener('alpine:init', () => {
   Alpine.store('ui', {
-    dialog: null,          // {kind, title, message, label, value, placeholder, confirmText, cancelText, danger, multiline, mono, maxLength}
+    dialog: null,          // {kind, title, message, label, value, placeholder, confirmText, cancelText, danger, multiline, mono, maxLength, checkbox}
     _resolve: null,
     toasts: [],
     _toastSeq: 0,
@@ -38,6 +38,9 @@ document.addEventListener('alpine:init', () => {
         mono: !!opts.mono,
         required: !!opts.required,
         maxLength: opts.maxLength || 500,
+        // optional {label, checked}: a prompt with a checkbox resolves to
+        // {value, checked} instead of a string (null still means cancelled)
+        checkbox: opts.checkbox ? {label: opts.checkbox.label || '', checked: !!opts.checkbox.checked} : null,
       };
       return new Promise(resolve => { this._resolve = resolve; });
     },
@@ -54,7 +57,8 @@ document.addEventListener('alpine:init', () => {
     submit() {
       if (!this.canSubmit) return;
       const d = this.dialog;
-      this._finish(d.kind === 'prompt' ? String(d.value) : true);
+      if (d.kind !== 'prompt') return this._finish(true);
+      this._finish(d.checkbox ? {value: String(d.value), checked: d.checkbox.checked} : String(d.value));
     },
 
     cancel() {

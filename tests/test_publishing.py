@@ -103,3 +103,49 @@ def test_publish_run_fork_unpublish(make_user, upload):
     assert c2.get(f"/api/published/{pub}").status_code == 200
     html = c2.get(f"/published/{pub}?version=1").get_data(as_text=True)
     assert f'window.PUBLISHED_ID = "{pub}"' in html and "window.PUBLISHED_VERSION = 1" in html
+
+
+@pytest.mark.slow
+def test_card_thumbnail_from_authors_latest_output(make_user, upload):
+    author, _, _ = make_user()
+    other, _, _ = make_user()
+    graph = {"nodes": [{"id": "g", "op": "to_grayscale", "params": {}, "pos": {"x": 1, "y": 2}}],
+             "edges": [{"from": ["input", "image"], "to": ["g", "image"]}]}
+    pid = author.post("/api/pipelines", json={"title": "Thumb", "graph": graph}).get_json()["pipeline_id"]
+
+    def card(c, pub):
+        return next(p for p in c.get("/api/published").get_json() if p["published_id"] == pub)
+
+    # no run yet: no image, card falls back to the op chain
+    r = author.post(f"/api/pipelines/{pid}/publish", json={}).get_json()
+    pub = r["published_id"]
+    assert r["thumbnail"] is False and card(other, pub)["thumbnail_url"] is None
+    assert other.get(f"/api/published/{pub}/thumbnail").status_code == 404
+
+    # author runs it (editor layout differs: pos is ignored when matching)
+    sid = author.post("/api/sessions", json={"image_ids": [upload(author)]}).get_json()["session_id"]
+    moved = json.loads(json.dumps(graph)); moved["nodes"][0]["pos"] = {"x": 50, "y": 60}
+    assert run_and_wait(author, sid, {"graph": moved, "title": "t"})[0] == 202
+
+    # unchanged re-publish refreshes the image; everyone can fetch it
+    r = author.post(f"/api/pipelines/{pid}/publish", json={}).get_json()
+    assert not r["created"] and r["thumbnail"] is True
+    url = card(other, pub)["thumbnail_url"]
+    resp = other.get(url)
+    assert resp.status_code == 200 and resp.mimetype == "image/jpeg"
+    assert max(Image.open(__import__("io").BytesIO(resp.data)).size) <= 480
+
+    # opting out removes it; unpublished hides it from others
+    assert author.post(f"/api/pipelines/{pid}/publish", json={"thumbnail": False}).get_json()["thumbnail"] is False
+    assert other.get(f"/api/published/{pub}/thumbnail").status_code == 404
+    assert author.post(f"/api/pipelines/{pid}/publish", json={}).get_json()["thumbnail"] is True
+    author.post(f"/api/published/{pub}/unpublish")
+    assert other.get(f"/api/published/{pub}/thumbnail").status_code == 404
+    assert author.get(f"/api/published/{pub}/thumbnail").status_code == 200
+
+    # a new version with a different graph drops the stale image
+    graph2 = {"nodes": [{**graph["nodes"][0], "id": "g2"}],
+              "edges": [{"from": ["input", "image"], "to": ["g2", "image"]}]}
+    assert author.patch(f"/api/pipelines/{pid}", json={"graph": graph2}).status_code == 200
+    r = author.post(f"/api/pipelines/{pid}/publish", json={}).get_json()
+    assert r["created"] and r["thumbnail"] is False
