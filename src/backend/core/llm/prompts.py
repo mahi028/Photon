@@ -110,6 +110,16 @@ def build_system_prompt(metadata: ImageMetadata,
           math, compare, astype, take, stack, to_number. Example, multi-Otsu
           regions: `lib:skimage.filters.threshold_multiotsu` (image -> thresh), then
           `digitize` (image + bins=thresh -> labels).
+        - Machine learning (scikit-learn): a `lib:sklearn.*` node makes an unfitted
+          model (output `model`, type MODEL); `ml_fit_predict` (model + X [+ y]) fits
+          it and applies it to every sample, `ml_fit` / `ml_predict` split the two.
+          `samples="pixels"` (default): X is an image or (H,W,C) feature stack, y a
+          label image, results are images. `samples="rows"`: X is a table, e.g.
+          `regionprops_table` -> `table_to_array`; `map_labels` paints per-object
+          results back onto the label image. Examples: k-means colour clusters =
+          KMeans -> ml_fit_predict(X=input image); pixel classifier =
+          multiscale_basic_features -> ml_fit_predict(model=RandomForestClassifier,
+          y=coarse labels, ignore_label=0). Models exist only within one run.
         - Non-image outputs (numbers, threshold arrays, tables) are reported back
           to you after the run.
         - Prefer catalog ops when one fits. If unsure of a library node's port or

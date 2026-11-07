@@ -64,7 +64,48 @@ MODULES: dict[str, str] = {
     "skimage.draw": "scikit-image",
     "scipy.ndimage": "scipy",
     "cv2": "opencv-python-headless",
+    # scikit-learn: only the estimator classes in ESTIMATORS (phase 2).
+    "sklearn.cluster": "scikit-learn",
+    "sklearn.mixture": "scikit-learn",
+    "sklearn.ensemble": "scikit-learn",
+    "sklearn.linear_model": "scikit-learn",
+    "sklearn.neighbors": "scikit-learn",
+    "sklearn.svm": "scikit-learn",
+    "sklearn.tree": "scikit-learn",
+    "sklearn.naive_bayes": "scikit-learn",
+    "sklearn.decomposition": "scikit-learn",
+    "sklearn.preprocessing": "scikit-learn",
 }
+
+# scikit-learn estimators exposed as constructor nodes ("make a model"): their
+# output is an unfitted MODEL that ml_fit / ml_predict / ml_fit_predict use.
+# Explicit list: meta-estimators (taking other estimators), out-of-core and
+# very slow ones stay out.
+ESTIMATORS = frozenset({
+    "sklearn.cluster.KMeans", "sklearn.cluster.MiniBatchKMeans", "sklearn.cluster.DBSCAN",
+    "sklearn.cluster.HDBSCAN", "sklearn.cluster.MeanShift", "sklearn.cluster.Birch",
+    "sklearn.cluster.AgglomerativeClustering",
+    "sklearn.mixture.GaussianMixture", "sklearn.mixture.BayesianGaussianMixture",
+    "sklearn.ensemble.RandomForestClassifier", "sklearn.ensemble.RandomForestRegressor",
+    "sklearn.ensemble.ExtraTreesClassifier", "sklearn.ensemble.HistGradientBoostingClassifier",
+    "sklearn.ensemble.HistGradientBoostingRegressor", "sklearn.ensemble.IsolationForest",
+    "sklearn.linear_model.LogisticRegression", "sklearn.linear_model.LinearRegression",
+    "sklearn.linear_model.Ridge", "sklearn.linear_model.SGDClassifier",
+    "sklearn.neighbors.KNeighborsClassifier", "sklearn.neighbors.KNeighborsRegressor",
+    "sklearn.neighbors.LocalOutlierFactor",
+    "sklearn.svm.SVC", "sklearn.svm.LinearSVC", "sklearn.svm.SVR",
+    "sklearn.tree.DecisionTreeClassifier", "sklearn.tree.DecisionTreeRegressor",
+    "sklearn.naive_bayes.GaussianNB",
+    "sklearn.decomposition.PCA", "sklearn.decomposition.NMF", "sklearn.decomposition.FastICA",
+    "sklearn.decomposition.TruncatedSVD",
+    "sklearn.preprocessing.StandardScaler", "sklearn.preprocessing.MinMaxScaler",
+    "sklearn.preprocessing.RobustScaler",
+})
+# Estimator args never exposed: parallelism (joblib would spawn workers the
+# sandbox forbids; thread pools are capped by limits.py instead), logging,
+# on-disk caching, in-place copies.
+_HIDDEN_ESTIMATOR_PARAMS = frozenset({"n_jobs", "verbose", "memory", "copy", "copy_X",
+                                      "warm_start", "callbacks", "pre_dispatch"})
 
 # Exact names that are never exposed (I/O, GUI, global state, or useless here).
 DENY_FUNCS = frozenset({
@@ -126,7 +167,7 @@ def _alts(type_str: str) -> list[str]:
     out = []
     for p in parts:
         p = p.strip()
-        if p and p not in ("optional", "none", "default"):
+        if p and p not in ("optional", "none", "default") and not p.startswith("default"):
             out.append(p)
     return out
 
@@ -354,6 +395,56 @@ def _cv2_spec(fn_name: str, fn) -> Optional[OpSpec]:
                                       "package": MODULES["cv2"]})
 
 
+def _estimator_spec(module: str, cls_name: str, cls) -> Optional[OpSpec]:
+    """A constructor node for an allow-listed scikit-learn estimator."""
+    try:
+        sig = inspect.signature(cls)
+    except (TypeError, ValueError):
+        return None
+    doc_types, doc_desc, summary = {}, {}, cls_name
+    try:
+        from scipy._lib._docscrape import NumpyDocString
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            d = NumpyDocString(inspect.getdoc(cls) or "")
+        for p in d["Parameters"]:
+            doc_types[p.name.strip()] = p.type
+            doc_desc[p.name.strip()] = " ".join(p.desc)
+        summary = " ".join(d["Summary"]) or cls_name
+    except Exception:
+        pass
+    params = []
+    for name, p in sig.parameters.items():
+        if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) or name in _HIDDEN_ESTIMATOR_PARAMS:
+            continue
+        has_default = p.default is not inspect.Parameter.empty
+        t = doc_types.get(name, "")
+        ok, default = _jsonable(p.default) if has_default else (True, None)
+        kind, choices = _kind_for(t, default if ok else None, has_default and ok)
+        if kind != "choice" and "callable" in t.lower() and not ok:
+            continue                       # callable-only argument
+        params.append(Param(name, kind, default if ok else None, choices=choices,
+                            doc=_short(f"{t}. {doc_desc.get(name, '')}".strip(". ")),
+                            nullable=has_default and default is None, required=not has_default))
+    methods = [m for m in ("fit", "predict", "predict_proba", "transform", "fit_predict",
+                           "decision_function", "score_samples") if hasattr(cls, m)]
+
+    def make(**kw):
+        mod = importlib.import_module(module)
+        kw = {k: (tuple(v) if isinstance(v, list) and all(not isinstance(x, (list, dict)) for x in v) else v)
+              for k, v in kw.items()}
+        return {"model": getattr(mod, cls_name)(**kw)}
+
+    return OpSpec(
+        name=f"{PREFIX}{module}.{cls_name}", category=module, fn=make,
+        inputs=[], outputs=[Port("model", PortType.MODEL)], params=params,
+        doc=_short(f"{summary} Makes an unfitted model; methods: {', '.join(methods)}. "
+                   "Use with ml_fit / ml_predict / ml_fit_predict."),
+        pass_defaults=False, library={"module": module, "function": cls_name,
+                                      "package": MODULES[module], "estimator": True,
+                                      "methods": methods})
+
+
 def _public_names(mod) -> list[str]:
     names = getattr(mod, "__all__", None) or [n for n in dir(mod) if not n.startswith("_")]
     return [n for n in names if not n.startswith("_")]
@@ -368,6 +459,14 @@ def _build(module: str, fn_name: str) -> Optional[OpSpec]:
         mod = importlib.import_module(module)
     except ImportError:
         return None
+    if module.startswith("sklearn."):
+        cls = getattr(mod, fn_name, None)
+        if f"{module}.{fn_name}" not in ESTIMATORS or not inspect.isclass(cls):
+            return None
+        try:
+            return _estimator_spec(module, fn_name, cls)
+        except Exception:
+            return None
     if fn_name not in _public_names(mod):
         return None
     fn = getattr(mod, fn_name, None)

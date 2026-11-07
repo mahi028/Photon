@@ -76,6 +76,14 @@ def _summary(v, depth=0):
         if v.dtype.kind in "biuf" and v.size:
             return f"array shape={list(v.shape)} dtype={v.dtype} min={np.nanmin(v):.6g} max={np.nanmax(v):.6g}"
         return f"array shape={list(v.shape)} dtype={v.dtype}"
+    if hasattr(v, "get_params") and hasattr(v, "fit"):          # sklearn model (D-042)
+        try:
+            from sklearn.utils.validation import check_is_fitted
+            check_is_fitted(v)
+            fitted = "fitted"
+        except Exception:
+            fitted = "not fitted"
+        return f"<{type(v).__name__} {fitted}: {repr(v)[:200]}>"
     if depth >= 3:
         return f"<{type(v).__name__}>"
     if isinstance(v, (list, tuple)):

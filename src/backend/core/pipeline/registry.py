@@ -242,5 +242,5 @@ def _ensure_loaded() -> None:
         from ..models.guard import check_op_modules
         check_op_modules()
         from .ops import (color, threshold, morphology, filters, features,  # noqa: F401
-                          masking, geometry, models, glue)
+                          masking, geometry, models, glue, ml)
         _loaded = True

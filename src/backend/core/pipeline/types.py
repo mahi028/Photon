@@ -21,6 +21,7 @@ class PortType(str, Enum):
     FEATURE_MAP = "FEATURE_MAP"    # (H, W, C) float — model/descriptor outputs (MIND now, DINOv2 in P4)
     NUMBER = "NUMBER"              # scalar
     ARRAY = "ARRAY"                # any ndarray (library ops, D-041)
+    MODEL = "MODEL"                # a scikit-learn estimator, fitted or not (D-042)
     ANY = "ANY"                    # wildcard: any value (tuples, dicts, objects...)
 
 

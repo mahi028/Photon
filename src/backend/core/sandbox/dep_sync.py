@@ -17,6 +17,7 @@ _PACKAGE_TO_MODULE: dict[str, str] = {
     "opencv-python-headless": "cv2",
     "opencv-python": "cv2",
     "scikit-image": "skimage",
+    "scikit-learn": "sklearn",
     "pillow": "PIL",
     "pydensecrf2": "pydensecrf",
 }

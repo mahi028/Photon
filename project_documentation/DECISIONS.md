@@ -383,3 +383,34 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - The allow-list guards against footguns; the boundary is still the sandbox child (rlimits and the D-036 guard, and the D-038 worker when it's enabled).
 
 **Not in phase 1.** scikit-learn make/fit/predict with a trained-model value (phase 2). Training jobs (phase 3). Pipeline-as-a-node (#9) and per-pipeline MCP tools (#10), which now get simpler because the types are generic.
+
+## D-042 — scikit-learn models as pipeline nodes (phase 2)
+
+**Decision.**
+- **Dependency.** `scikit-learn` is now a dependency, mapped to `sklearn` in `dep_sync`, so custom nodes can import it too.
+- **Model nodes.**
+  - 35 allow-listed estimator classes (`library.ESTIMATORS`) are constructor nodes: `lib:sklearn.cluster.KMeans`, `lib:sklearn.ensemble.RandomForestClassifier`, and others across clustering, mixtures, ensembles, linear models, neighbours, SVMs, trees, naive Bayes, decomposition and scaling.
+  - Params come from the class signature and numpydoc, like D-041.
+  - Hidden params: `n_jobs`, `verbose`, `memory`, `copy`, `copy_X`, `warm_start`. Joblib workers would be processes, which the sandbox forbids; thread pools are already capped by `limits.py`.
+  - Excluded: meta-estimators that take other estimators, model selection, and the dataset fetchers.
+- **New port type `MODEL`.** It connects only to MODEL (and from ANY).
+- **ML ops** (`ops/ml.py`): `ml_fit`, `ml_predict`, `ml_fit_predict`, `table_to_array` and `map_labels`.
+  - Fitting works on a clone, so the model node's own value stays unfitted.
+  - Two sample layouts:
+    - `pixels` (default): X is (H,W) or (H,W,C), y is a label image, and results come back as images.
+    - `rows`: X is an (N,C) table or a dict of columns, such as `regionprops_table` returns.
+  - `ignore_label` drops unlabeled training pixels; `max_samples` fits on a seeded random subset for speed.
+  - Clusterers without `predict` (DBSCAN, Agglomerative) use `fit_predict` on all samples, with a clear error if that exceeds `max_samples`.
+  - Errors name what went wrong: missing methods (listing the ones available), sample-count mismatches, unknown table columns.
+- **Value summaries.** A model's summary in run values says whether it's fitted and shows its params.
+- **Prompt.** The chat system prompt describes the model → fit/predict pattern with examples.
+
+**Models live for one run only.** Saving a fitted model and applying it to other images would mean unpickling a user-produced object. The sandbox forbids that on purpose (D-036), so it waits for a safe format such as skops or ONNX.
+
+**Verified in the sandbox child:**
+- k-means colour clusters;
+- a random-forest pixel classifier on `multiscale_basic_features`, trained from multi-Otsu labels (`predict_proba` returns an (H,W,3) image);
+- object clustering: `label` → `regionprops_table` → `table_to_array` → StandardScaler → KMeans → `map_labels`;
+- DBSCAN.
+
+**Performance note.** Importing scikit-learn takes about 1 s normally, but took over 100 s while the shared filesystem was slow. Pipeline timeouts (`EXECUTION_TIMEOUT_SECONDS` × 4) may need raising on such hosts.
