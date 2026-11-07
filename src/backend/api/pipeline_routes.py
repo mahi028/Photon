@@ -36,14 +36,33 @@ pipeline_bp = Blueprint("pipelines", __name__)
 @pipeline_bp.route("/ops", methods=["GET"])
 @login_required
 def list_ops():
-    """Registry catalog + port types + coercion table (editor palette)."""
-    cat = registry.catalog()
+    """Registry catalog + port types + coercion table (editor palette).
+    ?library=1 also includes every library op (several hundred, ~600 KB);
+    the editor uses /ops/library instead."""
+    cat = registry.catalog(include_library=request.args.get("library") == "1")
     cat["custom_nodes"] = [
         {"custom_node_id": cn["custom_node_id"], "name": cn["name"],
          "ports": cn["ports"], "params": cn["params"], "doc": cn["doc"]}
         for cn in store.list_custom_nodes(get_current_user_id())
     ]
     return jsonify(cat), 200
+
+
+@pipeline_bp.route("/ops/library", methods=["GET"])
+@login_required
+def library_ops():
+    """Library ops (D-041). ?q=<terms> ranks matches (limit <= 100);
+    ?names=lib:a,lib:b returns those specs (unknown names are skipped)."""
+    from ..core.pipeline import library
+    names = [n for n in (request.args.get("names") or "").split(",") if n.strip()]
+    if names:
+        specs = [library.get(n.strip()) for n in names[:200]]
+        return jsonify({"ops": [s.to_dict() for s in specs if s]}), 200
+    q = (request.args.get("q") or "").strip()
+    limit = max(1, min(100, _int_or_none(request.args.get("limit")) or 40))
+    found = library.search(q, limit) if q else []
+    return jsonify({"ops": [s.to_dict() for s in found],
+                    "total": len(library.all_specs())}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +347,7 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
         return {"error": "Session is already running"}
     run_id = uuid.uuid4().hex[:8]
     outputs_made: list[dict] = []
+    values_by_slot: dict[int, dict] = {}   # non-image outputs (numbers, tables...)
     last_error = None
 
     try:
@@ -361,6 +381,10 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
             if previews_rel:
                 push({"event": "node_previews", "image_slot": slot_idx,
                       "previews": previews_rel})
+            if result.get("values"):
+                values_by_slot[slot_idx] = result["values"]
+                push({"event": "node_values", "image_slot": slot_idx,
+                      "values": result["values"]})
 
             if result.get("error"):
                 last_error = result["error"]
@@ -403,7 +427,8 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
         if manage_status:
             manager.set_status(session_id, "idle")
 
-    return {"error": last_error, "outputs": outputs_made, "run_id": run_id}
+    return {"error": last_error, "outputs": outputs_made, "run_id": run_id,
+            "values": values_by_slot}
 
 
 @pipeline_bp.route("/sessions/<session_id>/run-pipeline", methods=["POST"])

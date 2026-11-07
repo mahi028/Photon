@@ -70,6 +70,8 @@ def build_system_prompt(metadata: ImageMetadata,
     timeout = config.EXECUTION_TIMEOUT_SECONDS
     op_catalog = registry.catalog_for_prompt(custom_nodes)
     published_block = _published_block(published)
+    from ..pipeline import library
+    library_names = library.names_for_prompt()
 
     return dedent(f"""\
         You are an image-processing assistant and code generator.
@@ -88,6 +90,32 @@ def build_system_prompt(metadata: ImageMetadata,
         Format: `name [category] (inputs) -> (outputs) params(...) — description`
 
         {op_catalog}
+
+        ## Library Functions (any of these can be a pipeline node)
+
+        Beyond the catalog, every function listed below is a node:
+        `{{"id": "t", "op": "lib:skimage.filters.threshold_multiotsu", "params": {{"classes": 3}}}}`
+        - Inputs are the function's array arguments, by their Python names (image,
+          label_image, markers, ...); arguments that have defaults are optional ports.
+          Every other argument is a param with its Python name. Set only what you
+          need: the function's own defaults apply.
+        - Outputs are named after the documented return values (thresh; labels and
+          num; real and imag; ...), otherwise `result`. Library ports are typed
+          ARRAY / NUMBER / ANY and connect to any array port; a wrong shape or
+          dtype fails at run time with the library's error.
+        - OpenCV (`lib:cv2.*`): params are JSON; constants by name
+          ("THRESH_BINARY|THRESH_OTSU"), sizes as lists ([5, 5]). OpenCV wants
+          uint8 or float32: insert an `astype` node before it when needed.
+        - Glue ops in the catalog (category glue) connect them: get_item, digitize,
+          math, compare, astype, take, stack, to_number. Example, multi-Otsu
+          regions: `lib:skimage.filters.threshold_multiotsu` (image -> thresh), then
+          `digitize` (image + bins=thresh -> labels).
+        - Non-image outputs (numbers, threshold arrays, tables) are reported back
+          to you after the run.
+        - Prefer catalog ops when one fits. If unsure of a library node's port or
+          param names, send your best guess: validation errors list the real ones.
+
+        {library_names}
 
         ## Shared Pipelines (published by colleagues on this instance)
 
@@ -339,10 +367,18 @@ def build_pipeline_result_message(run_result: dict, attempt: int, max_attempts: 
             "Adjust parameters or node choice and resend a corrected pipeline.",
         ])
     outputs = run_result.get("outputs") or []
+    values = run_result.get("values") or {}
+    value_lines = []
+    if values:
+        import json as _json
+        text = _json.dumps({str(k): v for k, v in values.items()}, default=str)
+        value_lines = ["", "Non-image outputs per image slot (node -> port -> value):",
+                       "```json", text[:2000] + ("..." if len(text) > 2000 else ""), "```"]
     return "\n".join([
         f"## Pipeline Run Succeeded (attempt {attempt}/{max_attempts})",
         "",
         f"- outputs produced: {len(outputs)}",
+        *value_lines,
         "",
         "Respond with response_type='chat' to explain the result to the user.",
     ])

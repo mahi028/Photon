@@ -340,3 +340,46 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - Cards without an image show the op chain.
 
 **Chat cards for shared runs.** Once the chat loop has resolved a `published_id`, the stored message is the resolved graph plus `published: {published_id, version, title, owner}`, and the UI gets a `pipeline_resolved` event. The card's "Save" becomes a Fork, which imports the snapshot's custom nodes into the user's library. "Open" goes to the read-only `/published/<id>?version=N`. A plain save would reference custom nodes the user doesn't own.
+
+## D-041 — Library functions as pipeline nodes (phase 1)
+
+**Context.** The curated catalogue (about 40 hand-written ops) kept the platform narrow: something like multi-Otsu meant writing a custom node. The libraries already document their functions well (304 of 309 public skimage functions in the exposed modules have numpydoc Parameters and Returns sections).
+
+**Decision.**
+- **Naming.** A node can name a function directly: `{"op": "lib:<module>.<function>"}` (`core/pipeline/library.py`). The graph schema, runner, sandbox child and remote worker are unchanged; `registry.get_op` resolves the `lib:` prefix.
+- **Modules exposed:** `skimage.{color, exposure, feature, filters, filters.rank, measure, morphology, restoration, segmentation, transform, util, registration, metrics, draw}`, `scipy.ndimage` and `cv2`, about 600 functions.
+- **How specs are generated:**
+  - **Python functions** use `inspect.signature` and numpydoc (`scipy._lib._docscrape`). Array-typed arguments become input ports, optional when they have a default. An "int or ndarray" argument becomes both an optional port and a param; a connected port wins. Everything else is a param whose kind (int, float, bool, str, choice or json) comes from the docstring type. Each documented return value becomes an output port. `out`/`output` buffers are hidden.
+  - **OpenCV builtins** are parsed from their `f(a, b[, c]) -> x, y` docstring line. Image-like names become ports. An optional argument that is also returned is an output buffer and is hidden. Constants can be given by name (`"THRESH_BINARY|THRESH_OTSU"`); flat lists become tuples and nested lists become float32 arrays.
+- **Only set params are passed** (`OpSpec.pass_defaults=False`), so the function's own defaults apply. Optional ports left unconnected are not passed either.
+- **Types:**
+  - New `ARRAY` type: it connects to and from every array type, plus NUMBER into ARRAY.
+  - `ANY` is now also a wildcard source.
+  - The runtime coercion check runs only on 2-D and larger arrays.
+  - IMAGE_RGB into IMAGE_GRAY still needs an explicit `to_grayscale`.
+- **Non-image outputs** (thresholds, numbers, tuples, regionprops tables) are reported back as size-capped JSON `values` per node:
+  - in the run result and the `node_values` SSE event;
+  - in the editor inspector and the chat card;
+  - in the MCP summary and the LLM's run feedback.
+
+  Only image-like arrays become previews or saved outputs.
+- **Glue ops** (`ops/glue.py`): `get_item`, `digitize`, `math`, `compare`, `astype`, `take`, `stack`, `to_number`. This is a curated slice of numpy, not numpy itself, which has too many footguns (memory-mapping, pickle loading, object arrays).
+- **Discovery:**
+  - Editor: searches `/api/ops/library?q=` (debounced), and fetches the specs a graph uses via `?names=`. `/api/ops` stays core-only unless `?library=1`, because the full list is about 600 KB.
+  - MCP: `list_ops(query=...)` returns `library_ops`, and `describe_op(name)` returns one spec.
+  - Chat: the system prompt lists the function names by module (about 9 KB). Validation errors now list a node's real inputs, outputs and params, so a wrong guess is corrected in one round.
+- **Reproducibility.** Published versions record `{distribution: version}` for the libraries their graph uses, plus numpy (`published_pipeline_versions.env_json`, `environment` in the API). An unchanged graph doesn't get a new version just because a library was upgraded.
+- The catalogue (about 3 s to build) warms in a background thread at app start.
+
+**Security.**
+- A name is accepted only if its module is allow-listed and the attribute is a public function of it, so there's no dotted-path resolution of user input.
+- Excluded:
+  - functions with file-like arguments (`fname`, `path`, `url`...);
+  - functions whose name contains read, write, load, save, show, fetch, download, plot, view or pickle;
+  - functions with a required callable argument;
+  - an explicit deny list (`cv2.imwrite*`, `cv2.imencode*`, `cv2.selectROI*`, `cv2.addText`, `skimage.util.apply_parallel`, `skimage.measure.ransac`...);
+  - OpenCV functions without an image argument (global state such as `setNumThreads`).
+- Params are JSON, so no callables or objects can be passed in.
+- The allow-list guards against footguns; the boundary is still the sandbox child (rlimits and the D-036 guard, and the D-038 worker when it's enabled).
+
+**Not in phase 1.** scikit-learn make/fit/predict with a trained-model value (phase 2). Training jobs (phase 3). Pipeline-as-a-node (#9) and per-pipeline MCP tools (#10), which now get simpler because the types are generic.

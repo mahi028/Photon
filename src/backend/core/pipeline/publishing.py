@@ -115,9 +115,11 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "",
     else:
         published_id = uuid.uuid4().hex
 
+    from . import library
     version = store.add_published_version(
         published_id, user_id, pipeline_id, title, description, graph, snapshot,
-        (changelog or "").strip()[:MAX_CHANGELOG], datetime.utcnow().isoformat())
+        (changelog or "").strip()[:MAX_CHANGELOG], datetime.utcnow().isoformat(),
+        environment=library.versions_for(graph))
     has_thumb = (set_thumbnail(user_id, published_id, graph, drop_stale=True) if thumbnail
                  else _remove_thumbnail(published_id))
     return {"published_id": published_id, "version": version, "created": True,
@@ -246,6 +248,7 @@ def get(viewer_id: str, published_id: str, version: int | None = None) -> Option
             "version": v["version"], "graph": v["graph"], "custom_nodes": v["custom_nodes"],
             "changelog": v["changelog"], "published_at": v["published_at"],
             "version_title": v["title"],
+            "environment": v.get("environment") or {},
             "versions": store.list_published_versions(published_id)}
 
 

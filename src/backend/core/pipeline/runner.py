@@ -94,7 +94,10 @@ def validate(graph: dict, custom_nodes: dict[str, dict] | None = None) -> list[I
         try:
             ins, outs, params, _ = _node_ports(node, custom_nodes)
         except KeyError as e:
-            issues.append(Issue(nid, f"Unknown op or custom node: {e.args[0]}"))
+            hint = (" Library ops are 'lib:<module>.<function>' from the allow-listed modules;"
+                    " file, network and GUI functions are not available."
+                    if str(node.get("op") or "").startswith("lib:") else "")
+            issues.append(Issue(nid, f"Unknown op or custom node: {e.args[0]}.{hint}"))
             continue
         ports[nid] = (ins, outs)
 
@@ -103,11 +106,14 @@ def validate(graph: dict, custom_nodes: dict[str, dict] | None = None) -> list[I
         known = {p.name: p for p in params}
         for k, v in supplied.items():
             if k not in known:
-                issues.append(Issue(nid, f"Unknown param '{k}'."))
+                issues.append(Issue(nid, f"Unknown param '{k}'. Params: {_names(params)}."))
                 continue
             err = known[k].validate(v)
             if err:
                 issues.append(Issue(nid, err))
+        for p in params:
+            if p.required and p.name not in supplied:
+                issues.append(Issue(nid, f"Required param '{p.name}' is not set."))
 
     # Edge validation (types + endpoints)
     incoming: dict[str, dict[str, tuple[str, str]]] = {nid: {} for nid in by_id}
@@ -130,7 +136,8 @@ def validate(graph: dict, custom_nodes: dict[str, dict] | None = None) -> list[I
 
         dst_ins = {p.name: p for p in ports[dst_id][0]}
         if dst_port not in dst_ins:
-            issues.append(Issue(dst_id, f"No input port '{dst_port}' on this node."))
+            issues.append(Issue(dst_id, f"No input port '{dst_port}' on this node. "
+                                        f"Inputs: {_names(ports[dst_id][0])}."))
             continue
 
         if src_id == INPUT_NODE_ID:
@@ -139,7 +146,8 @@ def validate(graph: dict, custom_nodes: dict[str, dict] | None = None) -> list[I
             # any image-ish port. run() re-checks with infer_type() and either
             # coerces or fails that node with a clear message.
             allowed_from_input = {PortType.IMAGE_ANY, PortType.IMAGE_RGB,
-                                  PortType.IMAGE_GRAY, PortType.FLOAT_MAP, PortType.ANY}
+                                  PortType.IMAGE_GRAY, PortType.FLOAT_MAP, PortType.ANY,
+                                  PortType.ARRAY}
             if dst_ins[dst_port].type not in allowed_from_input:
                 issues.append(Issue(
                     dst_id,
@@ -153,7 +161,8 @@ def validate(graph: dict, custom_nodes: dict[str, dict] | None = None) -> list[I
                 continue
             src_outs = {p.name: p for p in ports[src_id][1]}
             if src_port not in src_outs:
-                issues.append(Issue(src_id, f"No output port '{src_port}' on this node."))
+                issues.append(Issue(src_id, f"No output port '{src_port}' on this node. "
+                                            f"Outputs: {_names(ports[src_id][1])}."))
                 continue
             src_type = src_outs[src_port].type
 
@@ -175,8 +184,9 @@ def validate(graph: dict, custom_nodes: dict[str, dict] | None = None) -> list[I
     # Required-input check
     for nid, (ins, _outs) in ports.items():
         for p in ins:
-            if p.name not in incoming.get(nid, {}):
-                issues.append(Issue(nid, f"Required input '{p.name}' is not connected."))
+            if p.name not in incoming.get(nid, {}) and not p.optional:
+                issues.append(Issue(nid, f"Required input '{p.name}' is not connected. "
+                                         f"Inputs: {_names(ins)}."))
 
     # Cycle detection (Kahn topological sort over node-level dependencies)
     if not any(i.severity == "error" for i in issues):
@@ -185,6 +195,10 @@ def validate(graph: dict, custom_nodes: dict[str, dict] | None = None) -> list[I
             issues.append(Issue(None, "Pipeline contains a cycle."))
 
     return issues
+
+
+def _names(items) -> str:
+    return ", ".join(p.name for p in items) or "(none)"
 
 
 def _topo_order(by_id: dict[str, dict], edges: list[dict]) -> Optional[list[str]]:
@@ -253,20 +267,31 @@ def run(graph: dict, input_image: np.ndarray,
 
             kwargs: dict[str, Any] = {}
             for p in ins:
+                if p.name not in incoming[nid]:
+                    continue                         # optional, left unconnected
                 src_id, src_port = incoming[nid][p.name]
                 value = results[src_id][src_port]
-                from .types import infer_type
-                ok, coercion = can_connect(infer_type(value), p.type)
-                if coercion:
-                    value = apply_coercion(coercion, value)
+                if value is None:
+                    raise ValueError(f"input '{p.name}' received no value "
+                                     f"({src_id}.{src_port} returned None)")
+                if isinstance(value, np.ndarray) and value.ndim >= 2:
+                    from .types import infer_type
+                    ok, coercion = can_connect(infer_type(value), p.type)
+                    if coercion:
+                        value = apply_coercion(coercion, value)
                 kwargs[p.name] = value
 
             supplied = node.get("params") or {}
+            spec = registry.get_op(node["op"]) if node.get("op") else None
             for p in params:
-                kwargs[p.name] = supplied.get(p.name, p.default)
+                if p.name in kwargs:
+                    continue                         # port + param of one name: port wins
+                if p.name in supplied:
+                    kwargs[p.name] = supplied[p.name]
+                elif spec is None or spec.pass_defaults:
+                    kwargs[p.name] = p.default
 
-            if node.get("op"):
-                spec = registry.get_op(node["op"])
+            if spec is not None:
                 if spec.requires_model:
                     # Model ops never execute here: the sidecar owns the
                     # model's lifetime (lazy load, idle unload, VRAM budget).

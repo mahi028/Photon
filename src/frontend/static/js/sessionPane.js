@@ -210,6 +210,11 @@ function sessionPane(sess) {
           const msg = this._lastPipelineMessage();
           if (msg) msg.pipeline = event.pipeline;
         }
+        if (event.event === 'node_values' && event.image_slot === 0) {
+          // numbers / thresholds / tables a pipeline produced (D-041)
+          const msg = this._lastPipelineMessage();
+          if (msg) msg.nodeValues = {...(msg.nodeValues || {}), ...event.values};
+        }
         if (event.event === 'pipeline_invalid') {
           const msg = this._lastPipelineMessage();
           if (msg) msg.pipelineIssues = event.issues || [];

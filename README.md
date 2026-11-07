@@ -12,6 +12,7 @@ Photon is an autonomous, natural-language image processing studio. Upload any im
 - **Autonomous Execution Loop**: Photon writes Python, runs it in a secure sandbox, analyzes the output, and automatically fixes errors—up to 6 self-correction attempts per prompt.
 - **Batch Processing Support**: Apply the same transformation pipeline across multiple images simultaneously with a single prompt.
 - **Universal Format Support**: Works flawlessly with standard RGB/RGBA formats, grayscale, and even float32 multispectral `.npy` arrays.
+- **Library Nodes**: about 600 functions from scikit-image, `scipy.ndimage` and OpenCV are pipeline nodes, generated from their signatures and docstrings (`lib:skimage.filters.threshold_multiotsu`). Search them in the editor palette, `list_ops(query=...)` over MCP, or let the chat assistant pick them. Small glue nodes (`digitize`, `get_item`, `math`, `compare`, `astype`, ...) connect thresholds, tuples and tables to the next step.
 - **Manual Mode**: Need exact control? Drop into the built-in code editor to write or tweak the Python execution script yourself.
 - **Visual Version Control**: Interactive carousels, side-by-side comparisons, and filmstrips make it easy to track every iteration of your image.
 - **Export Ready**: Download your selected full-resolution outputs packaged in a neat ZIP archive.

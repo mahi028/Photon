@@ -58,6 +58,37 @@ def _to_preview_array(value):
         arr = (arr - lo) / (hi - lo) * 255.0
     return np.clip(arr, 0, 255).astype(np.uint8)
 
+def _is_image(v):
+    return (isinstance(v, np.ndarray) and v.ndim in (2, 3) and min(v.shape[:2]) >= 2
+            and v.dtype.kind in "biuf")
+
+def _summary(v, depth=0):
+    """JSON-safe, size-capped view of a non-image value (D-041)."""
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    if isinstance(v, str):
+        return v[:300]
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, np.ndarray):
+        if v.size <= 32 and v.dtype.kind in "biuf":
+            return np.round(v, 6).tolist() if v.dtype.kind == "f" else v.tolist()
+        if v.dtype.kind in "biuf" and v.size:
+            return f"array shape={list(v.shape)} dtype={v.dtype} min={np.nanmin(v):.6g} max={np.nanmax(v):.6g}"
+        return f"array shape={list(v.shape)} dtype={v.dtype}"
+    if depth >= 3:
+        return f"<{type(v).__name__}>"
+    if isinstance(v, (list, tuple)):
+        out = [_summary(x, depth + 1) for x in v[:16]]
+        return out + ([f"... {len(v) - 16} more"] if len(v) > 16 else [])
+    if isinstance(v, dict):
+        items = list(v.items())
+        out = {str(k): _summary(x, depth + 1) for k, x in items[:32]}
+        if len(items) > 32:
+            out["..."] = f"{len(items) - 32} more keys"
+        return out
+    return f"<{type(v).__name__}>"
+
 def main():
     graph = JOB["graph"]
     custom_nodes = JOB["custom_nodes"]
@@ -68,15 +99,23 @@ def main():
 
     events = []
     previews = {}
+    values = {}      # node -> port -> summary, for outputs that aren't images
 
     def on_node(nid, phase, payload):
         events.append({"node_id": nid, "phase": phase,
                        "message": payload.get("message")})
         if phase == "done":
             outs = payload.get("outputs") or {}
-            if not outs:
+            for port_name, v in outs.items():
+                if not _is_image(v):
+                    try:
+                        values.setdefault(nid, {})[port_name] = _summary(v)
+                    except Exception:
+                        values.setdefault(nid, {})[port_name] = f"<{type(v).__name__}>"
+            images = [(k, v) for k, v in outs.items() if _is_image(v)]
+            if not images:
                 return
-            port, value = next(iter(outs.items()))
+            port, value = images[0]
             try:
                 p = node_dir / f"{nid}.jpg"
                 Image.fromarray(_to_preview_array(value)).convert("RGB").save(p, quality=85)
@@ -90,6 +129,8 @@ def main():
     for nid in result["terminal"]:
         outs = result["results"].get(nid) or {}
         for port, value in outs.items():
+            if not _is_image(value):
+                continue            # reported in `values`, not saved as an image
             out_path = Path(JOB["output_dir"]) / f"{nid}_{port}.png"
             Path(JOB["output_dir"]).mkdir(parents=True, exist_ok=True)
             Image.fromarray(_to_preview_array(value)).save(out_path)
@@ -101,6 +142,7 @@ def main():
         "events": events,
         "previews": previews,
         "finals": finals,
+        "values": values,
     }, open(JOB["result_path"], "w"))
 
 try:

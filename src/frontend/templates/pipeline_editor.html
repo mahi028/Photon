@@ -97,12 +97,15 @@
     <!-- Palette -->
     <aside class="w-56 lg:w-64 shrink-0 border-r border-gray-800 bg-gray-950 flex flex-col">
       <div class="p-3 shrink-0 space-y-2">
-        <input type="text" x-model="paletteFilter" placeholder="Filter ops…"
+        <input type="text" x-model="paletteFilter" placeholder="Search ops and library…"
                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
         <button @click="addInputNode()" :disabled="isPreset"
                 class="btn-secondary w-full text-xs py-1.5 disabled:opacity-50">+ Source image</button>
       </div>
       <div class="flex-1 overflow-y-auto custom-scrollbar px-2 pb-3 space-y-3">
+        <p x-show="paletteFilter.trim().length < 2" class="text-[10px] text-gray-600 px-1">
+          Type to also search ~600 library functions (skimage, scipy.ndimage, OpenCV).
+        </p>
         <template x-for="[cat, ops] in Object.entries(paletteGroups)" :key="cat">
           <div>
             <p class="text-[10px] uppercase tracking-wide text-gray-500 px-1 mb-1" x-text="cat"></p>
@@ -110,7 +113,7 @@
               <template x-for="op in ops" :key="op.name">
                 <button @click="addOpNode(op)" :disabled="isPreset"
                         class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-gray-900 border border-transparent hover:border-gray-800 transition-colors disabled:opacity-50 group">
-                  <p class="text-xs font-mono text-gray-200 truncate" x-text="op.name"></p>
+                  <p class="text-xs font-mono text-gray-200 truncate" :title="op.name" x-text="shortName(op.name)"></p>
                   <p class="text-[10px] text-gray-600 line-clamp-2 group-hover:text-gray-500" x-text="op.doc"></p>
                 </button>
               </template>
@@ -158,8 +161,11 @@
         <template x-if="selectedSpec">
           <div class="space-y-3">
             <div>
-              <p class="text-xs font-mono text-gray-200" x-text="selectedSpec.name"></p>
+              <p class="text-xs font-mono text-gray-200 break-all" x-text="selectedSpec.name"></p>
               <p class="text-[10px] text-gray-500 mt-0.5" x-text="selectedSpec.doc"></p>
+              <template x-if="selectedSpec.library">
+                <p class="text-[10px] text-gray-600 mt-1">Library function: empty params use the library's defaults. Inputs marked ? are optional.</p>
+              </template>
             </div>
             <template x-if="!(selectedSpec.params || []).length">
               <p class="text-[11px] text-gray-600">No parameters.</p>
@@ -167,18 +173,30 @@
             <template x-for="p in (selectedSpec.params || [])" :key="p.name">
               <div>
                 <label class="text-[11px] text-gray-400 flex items-center justify-between">
-                  <span x-text="p.name"></span>
+                  <span><span x-text="p.name"></span><span x-show="p.required" class="text-amber-400"> *</span></span>
                   <span class="text-gray-600" x-text="p.kind"></span>
                 </label>
-                <template x-if="p.kind === 'bool'">
+                <template x-if="p.kind === 'bool' && selectedSpec.library">
+                  <select :value="isParamSet(p.name) ? String(paramValue(p.name)) : ''" :disabled="isPreset"
+                          @change="$event.target.value === '' ? setParam(p.name, '', 'json') : setParam(p.name, $event.target.value === 'true', 'bool')"
+                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                    <option value="" x-text="`default (${p.default})`"></option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </template>
+                <template x-if="p.kind === 'bool' && !selectedSpec.library">
                   <input type="checkbox" :checked="paramValue(p.name)" :disabled="isPreset"
                          @change="setParam(p.name, $event.target.checked, 'bool')"
                          class="mt-1 w-4 h-4 accent-indigo-500" />
                 </template>
                 <template x-if="p.kind === 'choice'">
-                  <select :value="paramValue(p.name)" :disabled="isPreset"
+                  <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
                           @change="setParam(p.name, $event.target.value, 'choice')"
                           class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                    <template x-if="selectedSpec.library">
+                      <option value="" x-text="`default (${p.default})`"></option>
+                    </template>
                     <template x-for="c in (p.choices || [])" :key="c">
                       <option :value="c" x-text="c"></option>
                     </template>
@@ -186,12 +204,32 @@
                 </template>
                 <template x-if="p.kind === 'int' || p.kind === 'float'">
                   <input type="number" :value="paramValue(p.name)" :disabled="isPreset"
+                         :placeholder="paramPlaceholder(p)"
                          :min="p.min" :max="p.max" :step="p.kind === 'int' ? 1 : 'any'"
                          @input="setParam(p.name, $event.target.value, p.kind)"
                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60" />
                 </template>
+                <template x-if="p.kind === 'str' || p.kind === 'json'">
+                  <input type="text" :value="paramText(p)" :disabled="isPreset"
+                         :placeholder="paramPlaceholder(p)"
+                         @change="setParam(p.name, $event.target.value, p.kind)"
+                         :class="jsonInvalid(p) ? 'border-red-500' : 'border-gray-700'"
+                         class="mt-1 w-full bg-gray-800 border rounded px-2 py-1 text-xs font-mono text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500 disabled:opacity-60" />
+                </template>
+                <p x-show="p.kind === 'json'" class="text-[10px] text-gray-600 mt-0.5"
+                   x-text="jsonInvalid(p) ? 'Not valid JSON (use 3, [5, 5], &quot;text&quot;, null)' : 'JSON: 3, [5, 5], &quot;THRESH_OTSU&quot;, null'"></p>
                 <p x-show="p.doc" class="text-[10px] text-gray-600 mt-0.5" x-text="p.doc"></p>
               </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- non-image outputs of the selected node (numbers, thresholds, tables) -->
+        <template x-if="selectedValues">
+          <div class="pt-3 border-t border-gray-800 space-y-1">
+            <p class="text-[10px] uppercase tracking-wide text-gray-500">Last run values</p>
+            <template x-for="[port, v] in Object.entries(selectedValues)" :key="port">
+              <p class="text-[11px] font-mono text-gray-300 break-all"><span class="text-gray-500" x-text="port + ' = '"></span><span x-text="formatValue(v)"></span></p>
             </template>
           </div>
         </template>

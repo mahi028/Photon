@@ -111,15 +111,28 @@ def _guarded(fn):
     return wrapper
 
 
+# GPU availability, probed once at startup in a SEPARATE process: `import
+# torch` can take minutes on a cold or network filesystem, a health check must
+# answer at once, and an in-process import would hold import locks that the
+# job handlers' own imports need. null until the probe finishes (or when
+# torch isn't installed).
+_GPU: dict = {"available": None}
+
+
+def _probe_gpu() -> None:
+    import subprocess
+    try:
+        r = subprocess.run([sys.executable, "-c", "import torch; print(torch.cuda.is_available())"],
+                           capture_output=True, text=True, timeout=900)
+        out = r.stdout.strip().splitlines()
+        _GPU["available"] = (out[-1] == "True") if r.returncode == 0 and out else None
+    except Exception:
+        _GPU["available"] = None
+
+
 @app.get("/v1/health")
 def health():
-    gpu = None
-    try:
-        import torch
-        gpu = torch.cuda.is_available()
-    except Exception:
-        pass
-    return jsonify({"ok": True, "gpu": gpu})
+    return jsonify({"ok": True, "gpu": _GPU["available"]})
 
 
 @app.post("/v1/run-code")
@@ -153,6 +166,7 @@ def main(argv=None):
     if not os.getenv("PHOTON_SANDBOX_TOKEN"):
         sys.exit("PHOTON_SANDBOX_TOKEN is required.")
     from waitress import serve
+    threading.Thread(target=_probe_gpu, name="gpu-probe", daemon=True).start()
     serve(app, host=args.host, port=args.port, threads=8)
 
 

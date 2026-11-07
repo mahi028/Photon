@@ -39,7 +39,13 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
     issues: [],
     runError: null,
     nodePreviews: {},
+    nodeValues: {},          // node id -> {port: value} for non-image outputs (D-041)
     paletteFilter: '',
+    libraryResults: [],      // library ops matching paletteFilter (server search)
+    libraryTotal: 0,
+    _libSearchTimer: null,
+    _libSearchSeq: 0,
+    jsonDrafts: {},          // "nodeId:param" -> text while a JSON param doesn't parse
     sessions: [],
     selectedSessionId: '',
     selectedNodeId: null,
@@ -90,6 +96,8 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         this.sessions = await sessRes.json();
         if (this.sessions.length) this.selectedSessionId = this.sessions[0].session_id;
       }
+      await this._loadLibrarySpecs((this.pipeline.graph?.nodes || []).map(n => n.op));
+      this.$watch('paletteFilter', () => this._searchLibrary());
 
       this._initDrawflow();
       this._importGraph(this.pipeline.graph);
@@ -111,7 +119,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
     // --- type checking ---------------------------------------------------
 
     _canConnect(srcType, dstType) {
-      if (dstType === 'ANY' || srcType === dstType) return true;
+      if (dstType === 'ANY' || srcType === 'ANY' || srcType === dstType) return true;
       return (this.catalog.coercions || []).some(
         c => c.src === srcType && c.dst === dstType);
     },
@@ -144,7 +152,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       // run time, so allow it into any image-ish port (server does the same).
       const srcIsInput = (src.data || {}).op === INPUT_OP;
       const ok = srcIsInput
-        ? ['IMAGE_ANY', 'IMAGE_RGB', 'IMAGE_GRAY', 'FLOAT_MAP', 'ANY'].includes(dstPort.type)
+        ? ['IMAGE_ANY', 'IMAGE_RGB', 'IMAGE_GRAY', 'FLOAT_MAP', 'ANY', 'ARRAY'].includes(dstPort.type)
         : this._canConnect(srcPort.type, dstPort.type);
 
       if (!ok) {
@@ -160,6 +168,36 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
     _toast(message, kind = 'info') {
       window.ui.toast(message, kind);
+    },
+
+    // --- library ops (D-041) ---------------------------------------------
+
+    async _loadLibrarySpecs(opNames) {
+      // Library specs aren't in /api/ops (hundreds of them): fetch the ones a
+      // graph uses before importing it.
+      const want = [...new Set(opNames.filter(n => n && n.startsWith('lib:') && !this.opsByName[n]))];
+      if (!want.length) return;
+      const res = await fetch(`/api/ops/library?names=${encodeURIComponent(want.join(','))}`);
+      if (!res.ok) return;
+      for (const op of (await res.json()).ops || []) this.opsByName[op.name] = op;
+    },
+
+    _searchLibrary() {
+      clearTimeout(this._libSearchTimer);
+      const q = this.paletteFilter.trim();
+      if (q.length < 2) { this.libraryResults = []; return; }
+      const seq = ++this._libSearchSeq;
+      this._libSearchTimer = setTimeout(async () => {
+        const res = await fetch(`/api/ops/library?q=${encodeURIComponent(q)}&limit=40`);
+        if (!res.ok || seq !== this._libSearchSeq) return;
+        const data = await res.json();
+        this.libraryResults = data.ops || [];
+        this.libraryTotal = data.total || 0;
+      }, 250);
+    },
+
+    shortName(name) {
+      return name.startsWith('lib:') ? name.slice(name.lastIndexOf('.') + 1) : name;
     },
 
     // --- palette ---------------------------------------------------------
@@ -179,14 +217,19 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         inputs: c.ports.inputs, outputs: c.ports.outputs, params: c.params || [],
         custom_node_id: c.custom_node_id,
       }));
+      for (const op of this.libraryResults) {
+        (groups[`library · ${op.category}`] = groups[`library · ${op.category}`] || []).push(op);
+      }
       return groups;
     },
 
     addOpNode(op) {
       if (this.isPreset) return;
-      const nodeId = `${op.name}_${Math.random().toString(36).slice(2, 7)}`;
+      if (op.library) this.opsByName[op.name] = op;
+      const nodeId = `${this.shortName(op.name)}_${Math.random().toString(36).slice(2, 7)}`;
       const params = {};
-      (op.params || []).forEach(p => { params[p.name] = p.default; });
+      // Library ops start with no params set, so the function's own defaults apply.
+      if (!op.library) (op.params || []).forEach(p => { params[p.name] = p.default; });
       this._addNode({
         our_id: nodeId,
         op: op.custom_node_id ? undefined : op.name,
@@ -211,14 +254,16 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
             ? this.customById[data.custom_node_id].ports
             : {inputs: this.opsByName[data.op].inputs, outputs: this.opsByName[data.op].outputs});
 
+      const esc = (t) => String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
       const inLabels = ports.inputs.map(p =>
-        `<div class="df-port-label">${p.name}<span class="df-port-type">${p.type}</span></div>`).join('');
+        `<div class="df-port-label${p.optional ? ' df-port-optional' : ''}" title="${p.optional ? 'optional' : ''}">${esc(p.name)}${p.optional ? '?' : ''}<span class="df-port-type">${p.type}</span></div>`).join('');
       const outLabels = ports.outputs.map(p =>
         `<div class="df-port-label df-out">${p.name}<span class="df-port-type">${p.type}</span></div>`).join('');
       const isInput = data.op === INPUT_OP;
       const html = `
         <div class="df-node ${isInput ? 'df-node-input' : ''}">
-          <div class="df-node-title">${data.label}</div>
+          <div class="df-node-title" title="${esc(data.label)}">${esc(data.label.startsWith('lib:') ? this.shortName(data.label) : data.label)}</div>
+          ${data.label.startsWith('lib:') ? `<div class="df-node-sub">${esc(data.label.slice(4, data.label.lastIndexOf('.')))}</div>` : ''}
           <div class="df-node-ports">
             <div class="df-node-col">${inLabels}</div>
             <div class="df-node-col df-node-col-out">${outLabels}</div>
@@ -263,16 +308,62 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       return n ? (n.data.params || {})[name] : undefined;
     },
 
+    isParamSet(name) {
+      const n = this.selectedNode;
+      return !!n && Object.prototype.hasOwnProperty.call(n.data.params || {}, name);
+    },
+
+    paramText(p) {
+      // text-box view of a str/json param; drafts keep unparsable input visible
+      const key = `${this.selectedNodeId}:${p.name}`;
+      if (key in this.jsonDrafts) return this.jsonDrafts[key];
+      if (!this.isParamSet(p.name)) return '';
+      const v = this.paramValue(p.name);
+      return p.kind === 'str' ? v : JSON.stringify(v);
+    },
+
+    paramPlaceholder(p) {
+      if (p.required) return 'required';
+      return p.default === null || p.default === undefined ? 'library default' : `default: ${JSON.stringify(p.default)}`;
+    },
+
+    jsonInvalid(p) {
+      return `${this.selectedNodeId}:${p.name}` in this.jsonDrafts;
+    },
+
     setParam(name, value, kind) {
       const n = this.selectedNode;
       if (!n || this.isPreset) return;
-      let v = value;
-      if (kind === 'int') v = parseInt(value, 10);
-      else if (kind === 'float') v = parseFloat(value);
-      else if (kind === 'bool') v = !!value;
-      const data = {...n.data, params: {...(n.data.params || {}), [name]: v}};
-      this.editor.updateNodeDataFromId(n.id, data);
+      const params = {...(n.data.params || {})};
+      const key = `${this.selectedNodeId}:${name}`;
+      const unset = value === '' || value === null || (typeof value === 'number' && Number.isNaN(value));
+      delete this.jsonDrafts[key];
+      if (unset && (kind === 'json' || kind === 'str' || this.opsByName[n.data.op]?.library)) {
+        delete params[name];             // back to the function's default
+      } else {
+        let v = value;
+        if (kind === 'int') v = parseInt(value, 10);
+        else if (kind === 'float') v = parseFloat(value);
+        else if (kind === 'bool') v = !!value;
+        else if (kind === 'json') {
+          try { v = JSON.parse(value); }
+          catch { this.jsonDrafts = {...this.jsonDrafts, [key]: value}; return; }
+        }
+        params[name] = v;
+      }
+      this.jsonDrafts = {...this.jsonDrafts};
+      this.editor.updateNodeDataFromId(n.id, {...n.data, params});
       this.dirty = true;
+    },
+
+    get selectedValues() {
+      const n = this.selectedNode;
+      return n ? this.nodeValues[(n.data || {}).our_id] || null : null;
+    },
+
+    formatValue(v) {
+      const t = JSON.stringify(v);
+      return t && t.length > 400 ? t.slice(0, 400) + '…' : t;
     },
 
     // --- graph <-> drawflow ---------------------------------------------
@@ -490,6 +581,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       this.running = true;
       this.runError = null;
       this.nodePreviews = {};
+      this.nodeValues = {};
       const graph = this._exportGraph();
 
       try {
@@ -520,6 +612,9 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         if (ev.event === 'stream_end') { es.close(); this.running = false; return; }
         if (ev.event === 'node_previews') {
           this.nodePreviews = {...this.nodePreviews, ...ev.previews};
+        }
+        if (ev.event === 'node_values' && ev.image_slot === 0) {
+          this.nodeValues = {...this.nodeValues, ...ev.values};
         }
         if (ev.event === 'pipeline_error') {
           this.runError = `${ev.failed_node || 'pipeline'}: ${ev.message}`;

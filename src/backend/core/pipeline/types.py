@@ -20,7 +20,15 @@ class PortType(str, Enum):
     FLOAT_MAP = "FLOAT_MAP"        # (H, W) float, unnormalized (e.g. optical density)
     FEATURE_MAP = "FEATURE_MAP"    # (H, W, C) float — model/descriptor outputs (MIND now, DINOv2 in P4)
     NUMBER = "NUMBER"              # scalar
-    ANY = "ANY"                    # wildcard sink
+    ARRAY = "ARRAY"                # any ndarray (library ops, D-041)
+    ANY = "ANY"                    # wildcard: any value (tuples, dicts, objects...)
+
+
+# Every array-valued type. ARRAY connects to and from all of them; the
+# concrete type is checked again at run time (infer_type + coercion).
+ARRAY_TYPES = frozenset({PortType.IMAGE_GRAY, PortType.IMAGE_RGB, PortType.IMAGE_ANY,
+                         PortType.MASK, PortType.FLOAT_MAP, PortType.FEATURE_MAP,
+                         PortType.ARRAY})
 
 
 # src -> dst pairs that connect WITHOUT coercion (beyond exact match).
@@ -52,6 +60,13 @@ def can_connect(src: PortType, dst: PortType) -> tuple[bool, str | None]:
     """Return (ok, coercion_name). coercion_name is None for direct matches."""
     if dst == PortType.ANY or src == dst:
         return True, None
+    # Library wildcards (D-041): ANY output may feed anything; ARRAY pairs
+    # with every array type, NUMBER may feed ARRAY (0-d). Checked at run time.
+    if src == PortType.ANY:
+        return True, None
+    if (src == PortType.ARRAY and dst in ARRAY_TYPES) or \
+       (dst == PortType.ARRAY and (src in ARRAY_TYPES or src == PortType.NUMBER)):
+        return True, None
     if (src, dst) in _DIRECT:
         return True, None
     coercion = _COERCIONS.get((src, dst))
@@ -63,6 +78,12 @@ def can_connect(src: PortType, dst: PortType) -> tuple[bool, str | None]:
 def coercion_table() -> list[dict]:
     """Serializable table for the editor's client-side mirror."""
     rows = [{"src": s.value, "dst": d.value, "coercion": None} for s, d in _DIRECT]
+    rows += [{"src": PortType.ANY.value, "dst": d.value, "coercion": None}
+             for d in PortType if d != PortType.ANY]
+    rows += [{"src": PortType.ARRAY.value, "dst": d.value, "coercion": None}
+             for d in ARRAY_TYPES if d != PortType.ARRAY]
+    rows += [{"src": s.value, "dst": PortType.ARRAY.value, "coercion": None}
+             for s in (ARRAY_TYPES | {PortType.NUMBER}) if s != PortType.ARRAY]
     rows += [{"src": s.value, "dst": d.value, "coercion": name}
              for (s, d), name in _COERCIONS.items()]
     return rows

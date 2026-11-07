@@ -61,6 +61,7 @@ def test_chat_runs_shared_pipeline(make_user, upload, monkeypatch):
         if sess.status == "idle" and sess.outputs:
             break
     assert f"`{pub}`" in seen["prompt"] and "Grayscale it" in seen["prompt"]
+    assert "threshold_multiotsu" in seen["prompt"] and "lib:skimage" in seen["prompt"], "library listed (D-041)"
     assert any("Shared pipeline not available" in (msg.message or "") for msg in sess.llm_conversation)
     prov = json.loads(sess.outputs[-1].code)
     assert prov["published_id"] == pub and prov["version"] == 1

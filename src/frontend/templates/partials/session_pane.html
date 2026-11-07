@@ -191,6 +191,19 @@
                     </div>
                   </template>
 
+                  <!-- non-image outputs (first image) -->
+                  <template x-if="msg.nodeValues && Object.keys(msg.nodeValues).length">
+                    <div class="px-4 pb-3 space-y-0.5">
+                      <template x-for="[nid, ports] in Object.entries(msg.nodeValues)" :key="nid">
+                        <template x-for="[port, v] in Object.entries(ports)" :key="nid + port">
+                          <p class="text-[11px] font-mono text-gray-400 break-all">
+                            <span class="text-gray-500" x-text="`${nid}.${port} = `"></span><span x-text="(JSON.stringify(v) || '').slice(0, 300)"></span>
+                          </p>
+                        </template>
+                      </template>
+                    </div>
+                  </template>
+
                   <!-- validation issues -->
                   <template x-if="msg.pipelineIssues && msg.pipelineIssues.length">
                     <div class="px-4 py-2 bg-amber-500/10 text-amber-400 text-xs space-y-0.5">

@@ -82,6 +82,8 @@ INSTRUCTIONS = (
         "Graph JSON: {\"nodes\": [{\"id\": \"g\", \"op\": \"to_grayscale\", \"params\": {}}], "
         "\"edges\": [{\"from\": [\"input\", \"image\"], \"to\": [\"g\", \"image\"]}]}.\n"
         "'input' is the implicit source node; ['input','image'] is the session image. "
+        "Beyond the curated ops, ~600 library functions (skimage, scipy.ndimage, OpenCV) are nodes "
+        "named 'lib:<module>.<function>': find them with list_ops(query=...), inspect with describe_op. "
         "Port names and types come from list_ops and must match exactly. IMAGE_RGB does "
         "not auto-convert to IMAGE_GRAY: insert to_grayscale. MASK/FLOAT_MAP auto-convert "
         "to grayscale. Always validate_pipeline before run_pipeline."
@@ -390,20 +392,45 @@ def delete_session(session_id: str, confirm_title: str) -> dict:
 # ---------------------------------------------------------------------------
 
 @_tool(annotations=_RO)
-def list_ops(category: str | None = None) -> dict:
-    """Op catalog: every op's typed input/output ports and params, the port types,
-    the implicit coercion table, and this user's saved custom nodes (usable via
-    {"id": ..., "custom_node_id": ...}). Optionally filter by category.
+def list_ops(category: str | None = None, query: str | None = None) -> dict:
+    """Op catalog: every curated op's typed input/output ports and params, the
+    port types, the implicit coercion table, and this user's saved custom
+    nodes (usable via {"id": ..., "custom_node_id": ...}). Optionally filter
+    by category.
+
+    Library functions (skimage, scipy.ndimage, OpenCV; ~600) are nodes too,
+    as op "lib:<module>.<function>", e.g. "lib:skimage.filters.threshold_multiotsu".
+    They are not listed here by default: pass `query` (e.g. "multiotsu",
+    "watershed", "cv2 morphology") to add the best-matching library ops under
+    "library_ops", or call describe_op(name) for one.
     """
+    from src.backend.core.pipeline import library
     cat = registry.catalog()
     if category:
         cat["ops"] = [o for o in cat["ops"] if o.get("category") == category]
+    if query:
+        q = query.lower()
+        cat["ops"] = [o for o in cat["ops"] if q in o["name"] or q in o["doc"].lower()] or cat["ops"]
+        cat["library_ops"] = [sp.to_dict() for sp in library.search(query, 25)]
+    cat["library_modules"] = sorted(library.MODULES)
     cat["custom_nodes"] = [
         {"custom_node_id": cn["custom_node_id"], "name": cn["name"],
          "ports": cn["ports"], "params": cn["params"], "doc": cn["doc"]}
         for cn in store.list_custom_nodes(_uid())
     ]
     return cat
+
+
+@_tool(annotations=_RO)
+def describe_op(name: str) -> dict:
+    """Full spec of one op: a catalog op ("otsu_threshold") or a library function
+    ("lib:skimage.segmentation.watershed", "lib:cv2.GaussianBlur"): input/output
+    ports (optional ones marked), params with kinds, defaults and docs."""
+    spec = registry.get_op(name)
+    if not spec:
+        raise ToolError(f"Unknown op: {name}. Library ops are 'lib:<module>.<function>'; "
+                        "search with list_ops(query=...).")
+    return spec.to_dict()
 
 
 @_tool(annotations=_RO)
@@ -444,8 +471,11 @@ def _summarize(session_id: str, result: dict, errors: list) -> list:
             img = _preview(rec.preview_path or rec.path)
             if img:
                 content.append(img)
-    summary = {"ok": not errors and bool(outputs) and not result.get("error"),
+    values = result.get("values") or {}
+    summary = {"ok": not errors and bool(outputs or values) and not result.get("error"),
                "run_id": result.get("run_id"), "outputs": outputs,
+               # non-image outputs per image slot: {slot: {node: {port: value}}}
+               "values": {str(k): v for k, v in values.items()} or None,
                "errors": errors or ([{"message": result["error"]}] if result.get("error") else None)}
     return [summary, *content]
 

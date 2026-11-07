@@ -31,6 +31,12 @@ def create_app() -> Flask:
     if signup_policy.warning():
         app.logger.warning("SECURITY: %s See core/auth/signup_policy.py.", signup_policy.warning())
 
+    # Build the library-op catalogue (D-041, ~3 s of imports + docstring
+    # parsing) off the request path, so the first search doesn't pay for it.
+    import threading
+    from .core.pipeline import library as _library
+    threading.Thread(target=_library.all_specs, name="library-warmup", daemon=True).start()
+
     # Register blueprints
     from .api.auth_routes import auth_bp
     from .api.upload_routes import upload_bp

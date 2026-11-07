@@ -19,23 +19,33 @@ from .types import PortType, coercion_table
 class Port:
     name: str
     type: PortType
+    optional: bool = False       # input may stay unconnected (library ops)
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "type": self.type.value}
+        d = {"name": self.name, "type": self.type.value}
+        if self.optional:
+            d["optional"] = True
+        return d
 
 
 @dataclass
 class Param:
     name: str
-    kind: str                    # "int" | "float" | "bool" | "choice"
+    kind: str                    # "int" | "float" | "bool" | "choice" | "str" | "json"
     default: Any
     min: Optional[float] = None
     max: Optional[float] = None
     choices: Optional[list] = None
     doc: str = ""
+    nullable: bool = False       # None is accepted (library "x=None" defaults)
+    required: bool = False       # no default: must be supplied
 
     def to_dict(self) -> dict:
         d = {"name": self.name, "kind": self.kind, "default": self.default, "doc": self.doc}
+        if self.nullable:
+            d["nullable"] = True
+        if self.required:
+            d["required"] = True
         if self.min is not None:
             d["min"] = self.min
         if self.max is not None:
@@ -46,6 +56,14 @@ class Param:
 
     def validate(self, value: Any) -> Optional[str]:
         """Return an error string, or None if the value is acceptable."""
+        if self.kind == "json":
+            return None                  # any JSON value; the function checks it
+        if value is None and self.nullable:
+            return None
+        if self.kind == "str":
+            if not isinstance(value, str):
+                return f"param '{self.name}' must be a string"
+            return None
         if self.kind == "int":
             if not isinstance(value, int) or isinstance(value, bool):
                 return f"param '{self.name}' must be an integer"
@@ -79,9 +97,13 @@ class OpSpec:
     # this set are dispatched to the model sidecar (which owns the model's
     # lifetime) instead of running in the sandboxed pipeline child.
     requires_model: Optional[str] = None
+    # Library ops (library.py): only params the node sets are passed, so the
+    # function's own defaults apply; `library` = {module, function, package}.
+    pass_defaults: bool = True
+    library: Optional[dict] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "category": self.category,
             "inputs": [p.to_dict() for p in self.inputs],
@@ -90,6 +112,9 @@ class OpSpec:
             "doc": self.doc,
             "requires_model": self.requires_model,
         }
+        if self.library:
+            d["library"] = self.library
+        return d
 
 
 _OPS: dict[str, OpSpec] = {}
@@ -137,6 +162,9 @@ def register_model_op(name: str, category: str, model: str, inputs: list[Port],
 
 
 def get_op(name: str) -> Optional[OpSpec]:
+    if name.startswith("lib:"):
+        from . import library
+        return library.get(name)
     _ensure_loaded()
     return _OPS.get(name)
 
@@ -146,11 +174,16 @@ def all_ops() -> dict[str, OpSpec]:
     return dict(_OPS)
 
 
-def catalog() -> dict:
-    """Full JSON for the editor palette + client-side type checking."""
+def catalog(include_library: bool = False) -> dict:
+    """Full JSON for the editor palette + client-side type checking.
+    include_library adds every library op (library.py, several hundred)."""
     _ensure_loaded()
+    ops = [spec.to_dict() for spec in _OPS.values()]
+    if include_library:
+        from . import library
+        ops += [spec.to_dict() for spec in library.all_specs().values()]
     return {
-        "ops": [spec.to_dict() for spec in _OPS.values()],
+        "ops": ops,
         "port_types": [t.value for t in PortType],
         "coercions": coercion_table(),
     }
@@ -209,5 +242,5 @@ def _ensure_loaded() -> None:
         from ..models.guard import check_op_modules
         check_op_modules()
         from .ops import (color, threshold, morphology, filters, features,  # noqa: F401
-                          masking, geometry, models)
+                          masking, geometry, models, glue)
         _loaded = True

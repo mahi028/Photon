@@ -220,6 +220,12 @@ def init_db():
             conn.execute("ALTER TABLE sessions ADD COLUMN status_at TEXT")
         except Exception:
             pass
+        # Library versions a published version was made with (D-041), e.g.
+        # {"scikit-image": "0.25.2", "numpy": "2.2.0"}. NULL for older rows.
+        try:
+            conn.execute("ALTER TABLE published_pipeline_versions ADD COLUMN env_json TEXT")
+        except Exception:
+            pass
 
 
 def _seed_presets(conn) -> None:
@@ -791,12 +797,14 @@ def load_published_version(published_id: str, version: int) -> Optional[Dict[str
         d = dict(row)
         d["graph"] = json.loads(d.pop("graph_json"))
         d["custom_nodes"] = json.loads(d.pop("custom_nodes_json"))
+        d["environment"] = json.loads(d.pop("env_json", None) or "{}")
         return d
 
 
 def add_published_version(published_id: str, owner_id: str, source_pipeline_id: str,
                           title: str, description: str, graph: dict,
-                          custom_nodes: dict, changelog: str, now: str) -> int:
+                          custom_nodes: dict, changelog: str, now: str,
+                          environment: Optional[dict] = None) -> int:
     """Create the publication if needed and append the next version, atomically.
     Re-publishing also clears unpublished_at. Returns the new version number."""
     with closing(_get_conn()) as conn, conn:
@@ -818,10 +826,10 @@ def add_published_version(published_id: str, owner_id: str, source_pipeline_id: 
                   version, now, now))
         conn.execute("""
             INSERT INTO published_pipeline_versions (published_id, version, title, description,
-                graph_json, custom_nodes_json, changelog, published_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                graph_json, custom_nodes_json, changelog, published_at, env_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (published_id, version, title, description, json.dumps(graph),
-              json.dumps(custom_nodes), changelog, now))
+              json.dumps(custom_nodes), changelog, now, json.dumps(environment or {})))
         return version
 
 

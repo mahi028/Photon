@@ -46,6 +46,9 @@ PHOTON_SANDBOX_BIND=10.0.0.5 docker compose -f docker/sandbox-worker/docker-comp
 curl http://10.0.0.5:8891/v1/health        # {"ok": true, "gpu": true}
 ```
 
+`gpu` is `null` for the first minute or so: it comes from a one-off
+`import torch` probe in a separate process, so health checks never wait on it.
+
 App side (`.env`), then restart the Flask app and the MCP server:
 
 ```

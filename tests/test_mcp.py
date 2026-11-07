@@ -163,3 +163,22 @@ def test_async_run_and_poll(mcp_url, make_user, upload):
     async def peek(s):
         return (await s.call_tool("get_run", {"job_id": job_id})).is_error
     assert _call(mcp_url, other_key, peek), "another user must not see the job"
+
+
+def test_library_ops_over_mcp(mcp_url, make_user):
+    c, _, _ = make_user()
+    key = c.post("/api/keys", json={"name": "lib"}).get_json()["key"]
+
+    async def steps(s):
+        cat = json.loads(_text(await s.call_tool("list_ops", {"query": "multiotsu"})))
+        spec = json.loads(_text(await s.call_tool("describe_op", {"name": "lib:cv2.threshold"})))
+        denied = await s.call_tool("describe_op", {"name": "lib:skimage.io.imread"})
+        graph = {"nodes": [{"id": "t", "op": "lib:skimage.filters.threshold_multiotsu"}],
+                 "edges": [{"from": ["input", "image"], "to": ["t", "image"]}]}
+        v = json.loads(_text(await s.call_tool("validate_pipeline", {"graph": graph})))
+        return cat, spec, denied.is_error, v
+
+    cat, spec, denied, v = _call(mcp_url, key, steps)
+    assert cat["library_ops"][0]["name"] == "lib:skimage.filters.threshold_multiotsu"
+    assert [o["name"] for o in spec["outputs"]] == ["retval", "dst"]
+    assert denied and v["valid"], v

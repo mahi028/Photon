@@ -207,6 +207,16 @@ pre.dracula-block code.hljs {
   line-height: 1.15;
   white-space: nowrap;
 }
+#drawflow .df-node-sub {           /* library op module (D-041) */
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: #6b7280;
+  padding: 3px 10px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#drawflow .df-port-optional { color: #6b7280; font-style: italic; }
 #drawflow .df-port-type {
   display: block;
   font-size: 8px;

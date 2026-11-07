@@ -54,11 +54,17 @@ def worker():
     proc = subprocess.Popen([sys.executable, "-m", "src.sandbox_worker.server", "--port", str(port)],
                             cwd=REPO, env=env, stderr=subprocess.DEVNULL)
     url = f"http://127.0.0.1:{port}"
-    for _ in range(60):
+    deadline = time.time() + 180          # cold imports on a network FS can be slow
+    while True:
         try:
-            requests.get(url + "/v1/health", timeout=1)
+            requests.get(url + "/v1/health", timeout=2)
             break
         except requests.RequestException:
+            if proc.poll() is not None:
+                pytest.fail(f"sandbox worker exited with {proc.returncode}")
+            if time.time() > deadline:
+                proc.kill()
+                pytest.fail("sandbox worker did not start within 180 s")
             time.sleep(0.5)
     yield url
     proc.terminate()
@@ -76,10 +82,10 @@ def remote(worker, monkeypatch):
 
 @pytest.mark.slow
 def test_worker_auth(worker, disk_png):
-    assert requests.get(worker + "/v1/health").json()["ok"]
+    assert requests.get(worker + "/v1/health", timeout=10).json()["ok"]
     for h in ({}, {"Authorization": "Bearer nope"}):
         r = requests.post(worker + "/v1/run-code", headers=h,
-                          data={"job": "{}"}, files={"input": open(disk_png, "rb")})
+                          data={"job": "{}"}, files={"input": open(disk_png, "rb")}, timeout=30)
         assert r.status_code == 401
 
 
