@@ -38,6 +38,7 @@ class LLMTurnResult(BaseModel):
         if response_type == "pipeline":
             if not v:
                 raise ValueError("'pipeline' must be provided when response_type is 'pipeline'")
-            if not isinstance(v, dict) or not v.get("nodes"):
-                raise ValueError("'pipeline' must be an object with a non-empty 'nodes' list")
+            if not isinstance(v, dict) or not (v.get("nodes") or v.get("published_id")):
+                raise ValueError("'pipeline' must be an object with a non-empty 'nodes' list "
+                                 "(or a 'published_id' to run a shared pipeline)")
         return v

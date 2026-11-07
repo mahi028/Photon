@@ -31,9 +31,12 @@ stay stdlib-only and self-contained: the run-code harness inlines its source.
 import os
 import sys
 
+# Thread-pool vars must match limits.THREAD_ENV_VARS (lazy imports read them).
 _SAFE_ENV = ("PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL",
              "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "PHOTON_NO_DOTENV")
+             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "OPENCV_FOR_THREADS_NUM",
+             "TF_NUM_INTRAOP_THREADS", "TF_NUM_INTEROP_THREADS",
+             "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "PHOTON_NO_DOTENV")
 
 _DENY_PREFIXES = (
     "subprocess.", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork",

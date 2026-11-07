@@ -8,8 +8,8 @@ Scope (v1, deliberately narrow):
   * pipeline ops only — registry ops are trusted code;
   * existing custom nodes may be *used* by custom_node_id, but new ones can't be
     saved, and there is no run_code: both execute arbitrary Python, and the
-    subprocess sandbox is not a boundary we expose to remote/injected prompts
-    until DockerExecutor ships.
+    local sandbox is not a boundary we expose to remote/injected prompts
+    until the gVisor worker (PHOTON_SANDBOX=remote, D-038) is in production.
 
 Identity — everything a caller creates shows up in that user's web UI:
   * HTTP: every request carries `Authorization: Bearer pk_...`, an API key the
@@ -29,6 +29,8 @@ import io
 import mimetypes
 import os
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -140,7 +142,9 @@ def _session(session_id: str):
 
 def _image_meta(image_id: str):
     """Registry lookup with SQLite fallback (image may have been uploaded via the UI
-    after this process started)."""
+    after this process started). None unless the caller may use the image."""
+    if not store.user_can_access_image(_uid(), image_id):
+        return None
     reg = get_image_registry()
     meta = reg.get(image_id)
     if meta is None:
@@ -253,7 +257,7 @@ def upload_image(path: str | None = None, url: str | None = None,
     if session_id:
         _session(session_id)                # ownership check before writing anything
     try:
-        meta = ingest_image_bytes(data, name)
+        meta = ingest_image_bytes(data, name, _uid())
     except IngestError as e:
         raise ToolError(str(e))
     get_image_registry()[meta.image_id] = meta
@@ -410,16 +414,56 @@ def validate_pipeline(graph: dict) -> dict:
     return {"valid": not issues, "issues": [i.to_dict() for i in issues]}
 
 
+# Background runs started with run_pipeline(wait=False), polled with get_run.
+# In-memory (this process only): outputs are also saved to the session, so a
+# lost run record never loses results.
+_RUNS: dict[str, dict] = {}
+_RUNS_LOCK = threading.Lock()
+_RUN_KEEP_SECONDS = 3600
+
+
+def _prune_runs() -> None:
+    cutoff = time.time() - _RUN_KEEP_SECONDS
+    with _RUNS_LOCK:
+        for k in [k for k, r in _RUNS.items() if r["finished_at"] and r["finished_at"] < cutoff]:
+            del _RUNS[k]
+
+
+def _summarize(session_id: str, result: dict, errors: list) -> list:
+    if result.get("issues"):
+        return [{"ok": False, "error": result["error"], "issues": result["issues"]}]
+    sess = _session(session_id)
+    by_id = {o.image_id: o for o in sess.outputs}
+    content: list[Any] = []
+    outputs = []
+    for o in result.get("outputs", []):
+        rec = by_id.get(o["image_id"])
+        outputs.append({"output_id": o["image_id"], "image_slot": o["image_slot"],
+                        "description": o["description"], "path": rec.path if rec else None})
+        if rec:
+            img = _preview(rec.preview_path or rec.path)
+            if img:
+                content.append(img)
+    summary = {"ok": not errors and bool(outputs) and not result.get("error"),
+               "run_id": result.get("run_id"), "outputs": outputs,
+               "errors": errors or ([{"message": result["error"]}] if result.get("error") else None)}
+    return [summary, *content]
+
+
 @_tool(structured_output=False)
 async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
                        pipeline_id: str | None = None, published_id: str | None = None,
-                       version: int | None = None, title: str = "mcp") -> list:
+                       version: int | None = None, title: str = "mcp", wait: bool = True) -> list:
     """Run a pipeline on every image in the session. Pass exactly one of: an
     ad-hoc `graph`, a saved `pipeline_id` (yours or a preset), or a
     `published_id` (anyone's public pipeline; optional `version`, default
     latest). Outputs are saved to the session (visible in the web UI). Returns
     per-output ids/paths plus previews, or the error and failing node so you
     can fix the graph and retry.
+
+    wait=False returns at once with a `job_id`; poll get_run(job_id) until
+    status is "done". Use it for long pipelines or many images, when your
+    client would time out waiting.
     """
     if sum(map(bool, (graph, pipeline_id, published_id))) != 1:
         raise ToolError("Provide exactly one of 'graph', 'pipeline_id' or 'published_id'.")
@@ -443,43 +487,67 @@ async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
 
     n_images = len(sess.image_ids)
     errors: list[dict] = []
+    uid = _uid()
+    job = {"job_id": uuid.uuid4().hex, "user_id": uid, "session_id": session_id,
+           "status": "running", "done": 0, "total": n_images, "started_at": time.time(),
+           "finished_at": None, "result": None}
 
-    def emit(ev: dict) -> None:
+    def emit(ev: dict, report=None) -> None:
         kind = ev.get("event")
         if kind == "pipeline_error":
             errors.append({"image_slot": ev.get("image_slot"),
                            "failed_node": ev.get("failed_node"), "message": ev.get("message")})
         if kind in ("pipeline_start", "output_saved", "pipeline_error"):
             done = ev.get("image_slot", 0) + (0 if kind == "pipeline_start" else 1)
-            try:
-                anyio.from_thread.run(ctx.report_progress, done, n_images,
-                                      f"{kind} slot {ev.get('image_slot')}")
-            except Exception:
-                pass                           # progress is best-effort
+            job["done"] = max(job["done"], done)
+            if report:
+                try:
+                    anyio.from_thread.run(report, done, n_images, f"{kind} slot {ev.get('image_slot')}")
+                except Exception:
+                    pass                       # progress is best-effort
 
-    uid = _uid()
-    result = await anyio.to_thread.run_sync(
-        lambda: run_pipeline_for_session(session_id, graph, title, uid, emit=emit,
-                                         custom_nodes=customs, provenance=provenance))
+    def work(report=None) -> dict:
+        try:
+            return run_pipeline_for_session(session_id, graph, title, uid,
+                                            emit=lambda ev: emit(ev, report),
+                                            custom_nodes=customs, provenance=provenance)
+        except Exception as e:                 # never leave a background job "running"
+            return {"error": f"Internal error: {e}", "outputs": []}
 
-    if result.get("issues"):
-        return [{"ok": False, "error": result["error"], "issues": result["issues"]}]
+    if wait:
+        result = await anyio.to_thread.run_sync(lambda: work(ctx.report_progress))
+        return _summarize(session_id, result, errors)
 
-    sess = _session(session_id)
-    by_id = {o.image_id: o for o in sess.outputs}
-    content: list[Any] = []
-    outputs = []
-    for o in result.get("outputs", []):
-        rec = by_id.get(o["image_id"])
-        outputs.append({"output_id": o["image_id"], "image_slot": o["image_slot"],
-                        "description": o["description"], "path": rec.path if rec else None})
-        if rec:
-            img = _preview(rec.preview_path or rec.path)
-            if img:
-                content.append(img)
-    summary = {"ok": not errors and bool(outputs), "run_id": result.get("run_id"),
-               "outputs": outputs, "errors": errors or None}
-    return [summary, *content]
+    def background() -> None:
+        result = work()
+        job.update(result={"raw": result, "errors": errors}, status="done", finished_at=time.time())
+
+    _prune_runs()
+    with _RUNS_LOCK:
+        _RUNS[job["job_id"]] = job
+    threading.Thread(target=background, daemon=True, name=f"mcp-run-{job['job_id'][:8]}").start()
+    return [{"job_id": job["job_id"], "status": "running", "total_images": n_images,
+             "hint": "Poll get_run(job_id) until status is 'done'."}]
+
+
+@_tool(structured_output=False, annotations=_RO)
+def get_run(job_id: str) -> list:
+    """Status of a run started with run_pipeline(wait=False). While running:
+    {status: "running", done, total}. When finished: status "done" plus the
+    same summary and previews run_pipeline returns. Jobs are kept for an hour
+    after they finish (outputs stay in the session regardless)."""
+    with _RUNS_LOCK:
+        job = _RUNS.get(job_id)
+    if not job or job["user_id"] != _uid():
+        raise ToolError("Unknown job_id (jobs expire an hour after finishing, and live in "
+                        "the MCP server process that started them).")
+    head = {"job_id": job_id, "session_id": job["session_id"], "status": job["status"],
+            "done": job["done"], "total": job["total"],
+            "elapsed_seconds": round((job["finished_at"] or time.time()) - job["started_at"], 1)}
+    if job["status"] != "done":
+        return [head]
+    summary, *content = _summarize(job["session_id"], job["result"]["raw"], job["result"]["errors"])
+    return [{**head, **summary}, *content]
 
 
 @_tool(annotations=_RO)

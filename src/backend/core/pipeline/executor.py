@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import subprocess
 import sys
 import tempfile
@@ -25,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ...config import config
+from ..sandbox import limits
 
 _CHILD = r'''
 import json, sys, traceback
@@ -173,37 +173,20 @@ def run_pipeline_subprocess(
         "unix_sockets": unix_sockets,
     }
     script = scratch / "run.py"
-    script.write_text(f"JOB = {json.dumps(job)}\n{_CHILD}", encoding="utf-8")
+    # JSON is not Python (true/false/null), so embed it as a string literal
+    # and parse it in the child.
+    script.write_text(f"import json as _json\nJOB = _json.loads({json.dumps(job)!r})\n{_CHILD}",
+                      encoding="utf-8")
 
-    blas = str(max(1, config.SANDBOX_BLAS_THREADS))
     child_env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(scratch),
         "TMPDIR": str(scratch),
-        "OMP_NUM_THREADS": blas,
-        "OPENBLAS_NUM_THREADS": blas,
-        "MKL_NUM_THREADS": blas,
-        "VECLIB_MAXIMUM_THREADS": blas,
-        "NUMEXPR_NUM_THREADS": blas,
+        **limits.thread_env(),
         "PHOTON_NO_DOTENV": "1",
         "MODEL_SIDECAR_ENABLED": "1" if config.MODEL_SIDECAR_ENABLED else "0",
     }
-
-    preexec_fn = None
-    if platform.system() != "Windows":
-        import resource
-
-        def _set_limits():
-            n = max(1, config.SANDBOX_BLAS_THREADS)
-            resource.setrlimit(resource.RLIMIT_CPU, (timeout * 2 * n, timeout * 3 * n))
-            try:
-                lim = config.SANDBOX_MEMORY_LIMIT_GB * 1024 ** 3
-                resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
-            except (ValueError, resource.error):
-                pass
-            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-
-        preexec_fn = _set_limits
+    preexec_fn = limits.make_preexec(timeout)
 
     t0 = time.time()
     try:
@@ -224,7 +207,7 @@ def run_pipeline_subprocess(
 
     elapsed = time.time() - t0
     if not result_path.is_file():
-        return {"error": f"Pipeline process produced no result. stderr: {stderr[:500]}",
+        return {"error": f"Pipeline process produced no result. stderr: {stderr[-1500:]}",
                 "failed_node": None, "events": [], "previews": {}, "finals": [],
                 "timed_out": False, "time_taken_seconds": elapsed}
 

@@ -7,8 +7,8 @@ Runs user/LLM code in a child process with:
 - Resource limits via resource.setrlimit on POSIX; best-effort on Windows
 - Per-run scratch directory (auto-cleaned after output copy)
 
-TODO(spec): Network isolation is advisory only (import blocklist) at this level.
-For true network isolation, switch to DockerExecutor (docker_executor.py stub).
+Not a hard boundary on its own (see guard.py). For real isolation run jobs on
+the gVisor sandbox worker: PHOTON_SANDBOX=remote (backend.py, D-038).
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from __future__ import annotations
 import ast
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -27,6 +26,7 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Optional
 
+from . import limits
 from .base import Executor
 from ...config import config
 from ...models.dto import ExecutionResult
@@ -273,8 +273,8 @@ class SubprocessExecutor(Executor):
     - Resource limits applied via preexec_fn (POSIX only).
     - Per-run scratch dir in volumes/tmp_exec/ is cleaned up after each run.
 
-    TODO(spec): True network isolation requires DockerExecutor. This executor
-    relies on the import blocklist to prevent network calls — not a hard boundary.
+    Sockets are denied by the runtime guard; that is still not a hard
+    boundary. Use PHOTON_SANDBOX=remote for one (backend.py).
     """
 
     def execute(
@@ -326,12 +326,8 @@ class SubprocessExecutor(Executor):
         )
         script_path.write_text(harness, encoding="utf-8")
 
-        # Step 3: Build restricted environment
-        # BLAS/OpenMP pools capped via env vars (must be set before the child's
-        # numpy import): unrestricted OpenBLAS spawns a thread per core, which on
-        # many-core hosts exhausts RLIMIT_CPU (counted across threads) and blows
-        # per-thread buffer/stack memory. Configurable: SANDBOX_BLAS_THREADS.
-        blas_threads = str(max(1, config.SANDBOX_BLAS_THREADS))
+        # Step 3: Build restricted environment. Native thread pools are capped
+        # via env vars (limits.py) before the child imports numpy/cv2/torch.
         child_env = {
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": "",
@@ -339,40 +335,12 @@ class SubprocessExecutor(Executor):
             "TMPDIR": str(scratch_dir),
             "TEMP": str(scratch_dir),
             "TMP": str(scratch_dir),
-            "OMP_NUM_THREADS": blas_threads,
-            "OPENBLAS_NUM_THREADS": blas_threads,
-            "MKL_NUM_THREADS": blas_threads,
-            "VECLIB_MAXIMUM_THREADS": blas_threads,
-            "NUMEXPR_NUM_THREADS": blas_threads,
+            **limits.thread_env(),
             "PHOTON_NO_DOTENV": "1",
         }
 
         # Step 4: Resource limits (POSIX only)
-        preexec_fn = None
-        if platform.system() != "Windows":
-            import resource
-
-            def _set_limits():
-                # CPU time: 2× timeout (soft) / 3× (hard), scaled by allowed
-                # BLAS threads — RLIMIT_CPU counts CPU summed across threads.
-                n_threads = max(1, config.SANDBOX_BLAS_THREADS)
-                resource.setrlimit(
-                    resource.RLIMIT_CPU,
-                    (timeout * 2 * n_threads, timeout * 3 * n_threads),
-                )
-                # Address space limit
-                try:
-                    limit_bytes = config.SANDBOX_MEMORY_LIMIT_GB * 1024**3
-                    resource.setrlimit(
-                        resource.RLIMIT_AS,
-                        (limit_bytes, limit_bytes),
-                    )
-                except (ValueError, resource.error):
-                    pass
-                # No core dumps
-                resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-
-            preexec_fn = _set_limits
+        preexec_fn = limits.make_preexec(timeout)
 
         # Step 5: Run the script
         t_start = time.time()

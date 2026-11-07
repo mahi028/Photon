@@ -1,0 +1,41 @@
+# Photon sandbox worker under gVisor, optionally with a GPU (D-038).
+#   PHOTON_SANDBOX_TOKEN=... docker compose -f docker/sandbox-worker/docker-compose.yml up -d --build
+# Then on the app:  PHOTON_SANDBOX=remote
+#                   PHOTON_SANDBOX_URL=http://<worker host>:8891
+#                   PHOTON_SANDBOX_TOKEN=<same token>
+services:
+  sandbox-worker:
+    build:
+      context: ../..
+      dockerfile: docker/sandbox-worker/Dockerfile
+    image: photon-sandbox-worker
+    runtime: runsc                       # gVisor; see README.md for the daemon.json entry
+    environment:
+      - PHOTON_SANDBOX_TOKEN=${PHOTON_SANDBOX_TOKEN:?set PHOTON_SANDBOX_TOKEN}
+      - PHOTON_SANDBOX_WORKER_SLOTS=${PHOTON_SANDBOX_WORKER_SLOTS:-2}
+      # 0 = no RLIMIT_AS (CUDA needs that); mem_limit below is the real cap.
+      # Set 8 for a CPU-only worker.
+      - SANDBOX_MEMORY_LIMIT_GB=${SANDBOX_MEMORY_LIMIT_GB:-0}
+      - SANDBOX_BLAS_THREADS=${SANDBOX_BLAS_THREADS:-4}
+    ports:
+      # Bind to the private interface the app reaches it on, never 0.0.0.0
+      # on a public host. Egress is blocked separately (README: firewall).
+      - "${PHOTON_SANDBOX_BIND:-127.0.0.1}:8891:8891"
+    read_only: true
+    tmpfs:
+      - /work:size=8g,mode=1777
+      - /tmp:size=1g,mode=1777
+      - /home/sandbox:size=2g,mode=1777   # model weight cache (torch hub etc.)
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    mem_limit: 24g
+    cpus: 8
+    deploy:
+      resources:
+        reservations:
+          devices:                       # remove this block for a CPU-only worker
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped

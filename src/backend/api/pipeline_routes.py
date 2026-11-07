@@ -20,7 +20,7 @@ from ..config import config
 from ..core.auth.middleware import get_current_user_id, login_required
 from ..core.image.thumbnail import generate_thumbnail
 from ..core.pipeline import publishing, registry, runner
-from ..core.pipeline.executor import run_pipeline_subprocess
+from ..core.sandbox import backend as sandbox_backend
 from ..core.sandbox.subprocess_executor import ASTSecurityError, _check_ast_safety
 from ..core.session import store
 from ..core.session.manager import get_manager
@@ -277,7 +277,8 @@ def _finish(session_id: str) -> None:
 def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                              user_id: str, source_turn_index: int | None = None,
                              emit=None, custom_nodes: dict | None = None,
-                             provenance: dict | None = None) -> dict:
+                             provenance: dict | None = None,
+                             manage_status: bool = True) -> dict:
     """Execute a graph against every image attached to a session.
 
     Shared by POST /sessions/<id>/run-pipeline and the LLM loop's
@@ -290,6 +291,8 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
     custom_nodes: resolve custom_node_ids from this dict instead of the
     runner's own library — a published pipeline's frozen snapshot (D-035).
     provenance: extra keys recorded with each output (e.g. published_id/version).
+    manage_status: claim the session (idle -> running) for the run and release
+    it after. False when the caller already holds it (the LLM loop).
     """
     push = emit or (lambda ev: _push(session_id, ev))
     manager = get_manager()
@@ -307,7 +310,8 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
         return {"error": "Pipeline is invalid", "issues": [i.to_dict() for i in issues]}
     provenance_json = json.dumps({**provenance, "graph": graph} if provenance else graph, indent=2)
 
-    manager.set_status(session_id, "running")
+    if manage_status and not manager.try_start_run(session_id):
+        return {"error": "Session is already running"}
     run_id = uuid.uuid4().hex[:8]
     outputs_made: list[dict] = []
     last_error = None
@@ -324,7 +328,7 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                   "image_id": image_id, "title": title,
                   "node_count": len(graph.get("nodes") or [])})
 
-            result = run_pipeline_subprocess(
+            result = sandbox_backend.run_pipeline(
                 graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
                 input_mode="RGB" if meta.channel_count >= 3 else "L",
             )
@@ -382,7 +386,8 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                 outputs_made.append(out_info)
                 push({"event": "output_saved", **out_info})
     finally:
-        manager.set_status(session_id, "idle")
+        if manage_status:
+            manager.set_status(session_id, "idle")
 
     return {"error": last_error, "outputs": outputs_made, "run_id": run_id}
 

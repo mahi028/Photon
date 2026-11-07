@@ -37,14 +37,13 @@ from ..core.llm.prompts import (
 from ..core.llm.schema import LLMTurnResult
 from ..core.pipeline import runner as pipeline_runner
 from ..core.session import store
-from ..core.sandbox.subprocess_executor import SubprocessExecutor
+from ..core.sandbox.backend import get_executor
 from ..core.image.thumbnail import generate_thumbnail
 from ..core.session.manager import get_manager
 from ..models.dto import Message, GeneratedImage
 from .upload_routes import get_image_registry
 
 chat_bp = Blueprint("chat", __name__)
-_executor = SubprocessExecutor()
 
 # Per-session SSE event queues: session_id -> Queue[dict | None]
 # None is the sentinel that signals the stream is finished.
@@ -134,7 +133,23 @@ def _persist_inline_custom_nodes(graph: dict, user_id: str) -> tuple[dict, list[
 
 
 def _run_llm_loop(session_id: str, user_prompt: str) -> None:
-    """Core generate→execute→fix loop. Runs in a daemon thread."""
+    """Thread entry point: the loop body, plus releasing the session and
+    closing the stream if it raises (otherwise the session stays 'running'
+    and the browser waits on a stream that never ends)."""
+    claimed: list[bool] = []
+    try:
+        _llm_loop_body(session_id, user_prompt, claimed)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("LLM loop crashed for session %s", session_id)
+        _push_event(session_id, {"event": "error", "message": f"Internal error: {e}"})
+        if claimed:
+            get_manager().set_status(session_id, "idle")
+        _finish_stream(session_id)
+
+
+def _llm_loop_body(session_id: str, user_prompt: str, claimed: list) -> None:
+    """Core generate→execute→fix loop."""
     manager = get_manager()
     sess = manager.get_session(session_id)
     if not sess:
@@ -149,11 +164,17 @@ def _run_llm_loop(session_id: str, user_prompt: str) -> None:
         _finish_stream(session_id)
         return
 
-    manager.set_status(session_id, "running")
+    if not manager.try_start_run(session_id):
+        _push_event(session_id, {"event": "error", "message": "Session is already running"})
+        _finish_stream(session_id)
+        return
+    claimed.append(True)
     # The user's saved custom nodes go into the catalog so the LLM reuses them
     # (by custom_node_id) instead of regenerating equivalent code (v3 P2).
     custom_nodes = store.list_custom_nodes(sess.user_id)
-    system_prompt = build_system_prompt(metadata, custom_nodes=custom_nodes)
+    from ..core.pipeline import publishing
+    system_prompt = build_system_prompt(metadata, custom_nodes=custom_nodes,
+                                        published=publishing.list_public(sess.user_id))
 
     # Append the user message to the conversation (write-through to SQLite — Section 5.3)
     manager.add_message(
@@ -242,6 +263,23 @@ def _run_llm_loop(session_id: str, user_prompt: str) -> None:
                 break
 
             graph = llm_result.pipeline or {}
+            run_customs = run_provenance = None
+            if graph.get("published_id"):
+                # A shared pipeline: run its frozen snapshot (D-035), no edits.
+                from ..core.pipeline import publishing
+                try:
+                    graph, run_customs, _, run_provenance = publishing.resolve_for_run(
+                        sess.user_id, str(graph["published_id"]),
+                        int(graph["version"]) if graph.get("version") else None)
+                except (publishing.PublishError, ValueError, TypeError) as e:
+                    manager.add_message(session_id, assistant_msg)
+                    manager.add_message(session_id, Message(
+                        role="user", internal=True, turn_index=len(sess.llm_conversation),
+                        message=f"## Shared pipeline not available\n\n{e}\n\n"
+                                "Use a published_id from the Shared Pipelines list, or compose "
+                                "your own pipeline from catalog ops."))
+                    last_error = str(e)
+                    continue
             try:
                 graph, saved_customs = _persist_inline_custom_nodes(graph, sess.user_id)
             except ValueError as e:
@@ -254,7 +292,8 @@ def _run_llm_loop(session_id: str, user_prompt: str) -> None:
                 last_error = str(e)
                 continue
 
-            customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(sess.user_id)}
+            customs = run_customs if run_customs is not None else {
+                cn["custom_node_id"]: cn for cn in store.list_custom_nodes(sess.user_id)}
             issues = pipeline_runner.validate(graph, custom_nodes=customs)
             if issues:
                 issue_dicts = [i.to_dict() for i in issues]
@@ -276,7 +315,8 @@ def _run_llm_loop(session_id: str, user_prompt: str) -> None:
             from .pipeline_routes import run_pipeline_for_session
             run_result = run_pipeline_for_session(
                 session_id, graph, title="llm", user_id=sess.user_id,
-                source_turn_index=turn_index)
+                source_turn_index=turn_index, manage_status=False,
+                custom_nodes=run_customs, provenance=run_provenance)
 
             if run_result.get("error"):
                 last_error = run_result["error"]
@@ -304,7 +344,7 @@ def _run_llm_loop(session_id: str, user_prompt: str) -> None:
             "message": f"Running code in sandbox...",
         })
 
-        exec_result = _executor.execute(
+        exec_result = get_executor().execute(
             code=llm_result.code or "",
             input_path=input_path,
             output_dir=str(output_dir),
@@ -401,7 +441,7 @@ def _run_llm_loop(session_id: str, user_prompt: str) -> None:
                     "image_id": img_id,
                     "message": f"Running on image {slot_idx + 1}/{len(sess.image_ids)}...",
                 })
-                slot_result = _executor.execute(
+                slot_result = get_executor().execute(
                     code=code,
                     input_path=img_input_path,
                     output_dir=str(img_output_dir),
