@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from flask import Blueprint, request, jsonify
 
-from ..core.auth.middleware import login_required
+from ..core.auth.middleware import get_current_user_id, login_required
 from ..core.image.fetch import FetchError, fetch_url
 from ..core.image.ingest import IngestError, ingest_image_bytes
 
@@ -47,7 +47,7 @@ def upload_image():
         return jsonify({"error": "Provide either 'file' (multipart) or 'url' (JSON)."}), 400
 
     try:
-        metadata = ingest_image_bytes(file_bytes, original_filename)
+        metadata = ingest_image_bytes(file_bytes, original_filename, get_current_user_id())
     except IngestError as e:
         return jsonify({"error": str(e)}), e.status
 
@@ -64,7 +64,8 @@ def upload_image():
 @login_required
 def get_image_metadata(image_id: str):
     """Return metadata for a previously uploaded image."""
+    from ..core.session.store import user_can_access_image
     meta = _image_registry.get(image_id)
-    if not meta:
+    if not meta or not user_can_access_image(get_current_user_id(), image_id):
         return jsonify({"error": "Image not found"}), 404
     return jsonify(meta.to_dict()), 200

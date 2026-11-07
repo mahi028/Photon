@@ -121,7 +121,9 @@ class Config:
 
     # ---- Volume paths (relative to project root) ----
     ROOT_DIR: Path = _root
-    VOLUMES_DIR: Path = _root / "volumes"
+    # PHOTON_VOLUMES_DIR relocates all runtime state (DB, uploads, outputs);
+    # the test suite points it at a temp dir.
+    VOLUMES_DIR: Path = Path(os.getenv("PHOTON_VOLUMES_DIR") or (_root / "volumes")).resolve()
     UPLOADS_DIR: Path = VOLUMES_DIR / "uploads"
     OUTPUTS_DIR: Path = VOLUMES_DIR / "outputs"
     TMP_EXEC_DIR: Path = VOLUMES_DIR / "tmp_exec"
@@ -139,10 +141,8 @@ class Config:
     SANDBOX_ALLOWED_IMPORTS: frozenset = _SYNCED_SANDBOX_IMPORTS
     SANDBOX_LIBRARY_WHITELIST: str = _SYNCED_LIBRARY_WHITELIST
 
-    # Sandbox executor class
-    # Use DockerExecutor in production for security, SubprocessExecutor in development for speed
-    # EXECUTOR_CLASS: str = "docker" if ENV == "production" else "subprocess"
-    EXECUTOR_CLASS: str = "subprocess"
+    # Where untrusted code runs: PHOTON_SANDBOX=local|remote, read at call
+    # time by core/sandbox/backend.py (D-038).
 
 
 config = Config()

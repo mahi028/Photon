@@ -25,7 +25,8 @@ class IngestError(Exception):
         self.status = status
 
 
-def ingest_image_bytes(file_bytes: bytes, original_filename: str) -> ImageMetadata:
+def ingest_image_bytes(file_bytes: bytes, original_filename: str,
+                       owner_id: str | None = None) -> ImageMetadata:
     """Validate, save, preview and register one image. Returns its metadata.
 
     The caller is responsible for adding the result to the in-memory image
@@ -63,5 +64,5 @@ def ingest_image_bytes(file_bytes: bytes, original_filename: str) -> ImageMetada
         raise IngestError(f"Metadata extraction failed: {e}", 422) from e
 
     from ..session.store import save_image
-    save_image(metadata)
+    save_image(metadata, owner_id)
     return metadata

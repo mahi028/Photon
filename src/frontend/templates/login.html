@@ -18,9 +18,11 @@
         <button type="button" @click="mode = 'login'"
                 :class="mode === 'login' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'"
                 class="flex-1 py-1.5 rounded-md transition-colors">Log in</button>
+        {% if signup.signup_mode != 'closed' %}
         <button type="button" @click="mode = 'signup'"
                 :class="mode === 'signup' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'"
                 class="flex-1 py-1.5 rounded-md transition-colors">Sign up</button>
+        {% endif %}
       </div>
 
       <template x-if="error">
@@ -47,6 +49,10 @@
                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
         <input type="password" x-model="signupPassword" placeholder="Password (min 8 characters)" required minlength="8"
                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+        {% if signup.invite_required %}
+        <input type="text" x-model="signupInvite" placeholder="Invite code" required autocomplete="off"
+               class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+        {% endif %}
         <button type="submit" :disabled="submitting" class="btn-primary w-full py-2 disabled:opacity-50">
           <span x-show="!submitting">Create account</span>
           <span x-show="submitting">Creating…</span>
@@ -75,9 +81,9 @@ function loginPage() {
   return {
     mode: 'login',
     loginId: '', loginPassword: '',
-    signupUsername: '', signupEmail: '', signupPassword: '',
+    signupUsername: '', signupEmail: '', signupPassword: '', signupInvite: '',
     submitting: false,
-    error: null,
+    error: {{ (error or None) | tojson }},
 
     async login() {
       this.submitting = true;
@@ -109,6 +115,7 @@ function loginPage() {
             username: this.signupUsername,
             email: this.signupEmail,
             password: this.signupPassword,
+            invite_code: this.signupInvite,
           }),
         });
         const data = await res.json();

@@ -12,6 +12,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from ..config import config
 from ..core.auth.oauth import oauth
+from ..core.auth.signup_policy import policy as signup_policy
 from ..core.session import store
 
 auth_bp = Blueprint("auth", __name__)
@@ -22,13 +23,14 @@ _MIN_PASSWORD_LENGTH = 8
 @auth_bp.route("/auth/login")
 def login_page():
     """Render the login/signup page. Google button shown only if enabled."""
-    return render_template("login.html", google_oauth_enabled=config.GOOGLE_OAUTH_ENABLED)
+    return render_template("login.html", google_oauth_enabled=config.GOOGLE_OAUTH_ENABLED,
+                           signup=signup_policy.describe(), error=request.args.get("error", ""))
 
 
 @auth_bp.route("/auth/config")
 def auth_config():
     """Lets the frontend know whether to render the Google sign-in option."""
-    return jsonify({"google_oauth_enabled": config.GOOGLE_OAUTH_ENABLED})
+    return jsonify({"google_oauth_enabled": config.GOOGLE_OAUTH_ENABLED, **signup_policy.describe()})
 
 
 @auth_bp.route("/auth/signup", methods=["POST"])
@@ -48,6 +50,9 @@ def signup():
             "error": f"username, email, and a password of at least "
                      f"{_MIN_PASSWORD_LENGTH} characters are required"
         }), 400
+    denied = signup_policy.check_password_signup(email, data.get("invite_code"))
+    if denied:
+        return jsonify({"error": denied}), 403
     if store.find_user_by_username_or_email(username) or store.find_user_by_username_or_email(email):
         return jsonify({"error": "username or email already in use"}), 409
 
@@ -121,6 +126,9 @@ def callback_google():
         store.update_user_login(user["user_id"], now)
         user_id = user["user_id"]
     else:
+        denied = signup_policy.check_google_signup(email, bool(userinfo.get("email_verified")))
+        if denied:
+            return redirect(url_for("auth.login_page", error=denied))
         user_id = uuid.uuid4().hex
         # username is NOT NULL UNIQUE — derive from email local-part, dedupe on collision
         username = _unique_username_from_email(email)

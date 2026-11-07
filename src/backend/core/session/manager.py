@@ -68,7 +68,7 @@ class SessionManager:
                 # Another process (gunicorn worker, MCP server) may have written
                 # this session since we cached it; reload rather than serve — or
                 # later save_session() over — a stale copy.
-                if store.load_session_updated_at(session_id) == cached.updated_at.isoformat():
+                if store.load_session_version(session_id) == (cached.updated_at.isoformat(), cached.status):
                     self._touch(session_id)
                     return cached
                 del self._cache[session_id]
@@ -214,7 +214,7 @@ class SessionManager:
                 path=str(dst_path),
                 preview_path=str(dst_preview) if src_preview.is_file() else "",
             )
-            store.save_image(new_meta)
+            store.save_image(new_meta, target_user_id)
             new_image_ids.append(new_img_id)
 
         # 2. Create the new session.
@@ -325,12 +325,30 @@ class SessionManager:
             sess.updated_at = datetime.utcnow()
             store.save_session(sess)
 
+    # A run that claimed a session but never released it (process killed)
+    # stops blocking it after this long. Longer than any real run.
+    STALE_RUN_SECONDS = 3600
+
+    def try_start_run(self, session_id: str) -> bool:
+        """Claim the session for a run (idle -> running). False if another
+        run holds it, in this process or any other sharing sessions.db. The
+        caller must set_status(..., 'idle') when done (try/finally)."""
+        from datetime import timedelta
+        now = datetime.utcnow()
+        stale = (now - timedelta(seconds=self.STALE_RUN_SECONDS)).isoformat()
+        if not store.claim_session_run(session_id, now.isoformat(), stale):
+            return False
+        with self._lock:
+            if session_id in self._cache:
+                self._cache[session_id].status = "running"
+        return True
+
     def set_status(self, session_id: str, status: str) -> None:
         """Update session status ('idle' | 'running' | 'error')."""
-        sess = self.get_session(session_id)
-        if sess:
-            sess.status = status
-            store.save_session(sess)
+        store.set_session_status(session_id, status, datetime.utcnow().isoformat())
+        with self._lock:
+            if session_id in self._cache:
+                self._cache[session_id].status = status
 
     def save_manual_code(self, session_id: str, code: str) -> None:
         """Persist editor code for a session (only when Run is clicked)."""

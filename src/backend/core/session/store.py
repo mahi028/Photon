@@ -207,6 +207,19 @@ def init_db():
             )
         """)
         _seed_presets(conn)
+        # --- additive migrations (run after every CREATE TABLE) ---
+        # Uploader of each image (D-037). NULL for images from before this
+        # column: those are reachable only through a session that lists them.
+        try:
+            conn.execute("ALTER TABLE images ADD COLUMN owner_id TEXT")
+        except Exception:
+            pass
+        # When status last changed: lets a 'running' left behind by a crashed
+        # process expire instead of locking the session forever.
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN status_at TEXT")
+        except Exception:
+            pass
 
 
 def _seed_presets(conn) -> None:
@@ -231,6 +244,8 @@ def save_session(sess: Session) -> None:
     # UPSERT, NOT "INSERT OR REPLACE": REPLACE is implemented as DELETE+INSERT,
     # and with PRAGMA foreign_keys=ON the DELETE cascades — silently wiping the
     # session's messages and outputs on every status update (see D-012).
+    # status is NOT updated here: only claim_session_run/set_session_status
+    # write it, so a stale cached copy can't overwrite another process's run.
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
             INSERT INTO sessions
@@ -240,7 +255,6 @@ def save_session(sess: Session) -> None:
             ON CONFLICT(session_id) DO UPDATE SET
                 title = excluded.title,
                 updated_at = excluded.updated_at,
-                status = excluded.status,
                 current_code = excluded.current_code,
                 image_ids_json = excluded.image_ids_json
         """, (
@@ -249,20 +263,44 @@ def save_session(sess: Session) -> None:
             json.dumps(sess.image_ids),
         ))
 
-def save_image(metadata: ImageMetadata) -> None:
+def save_image(metadata: ImageMetadata, owner_id: Optional[str] = None) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
             INSERT OR REPLACE INTO images
             (image_id, original_filename, shape, dtype, channel_count, size_bytes,
-             size_mb, guessed_kind, value_range, path, preview_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             size_mb, guessed_kind, value_range, path, preview_path, owner_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             metadata.image_id, metadata.original_filename,
             json.dumps(list(metadata.shape)), metadata.dtype,
             metadata.channel_count, metadata.size_bytes, metadata.size_mb,
             metadata.guessed_kind, json.dumps(list(metadata.value_range)),
-            metadata.path, metadata.preview_path,
+            metadata.path, metadata.preview_path, owner_id,
         ))
+
+
+def user_can_access_image(user_id: str, image_id: str) -> bool:
+    """Uploader, or the owner of any session that lists the image (covers
+    images from before owner_id existed and images cloned via share links)."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT owner_id FROM images WHERE image_id = ?", (image_id,)).fetchone()
+        if row is None:
+            return False
+        if row["owner_id"] == user_id:
+            return True
+        rows = conn.execute(
+            "SELECT image_ids_json FROM sessions WHERE user_id = ? AND image_ids_json LIKE ?",
+            (user_id, f"%{image_id}%")).fetchall()
+        return any(image_id in json.loads(r["image_ids_json"] or "[]") for r in rows)
+
+
+def image_id_for_upload_file(filename: str) -> Optional[str]:
+    """volumes/uploads/<image_id>[_preview].<ext> -> image_id if registered."""
+    stem = Path(filename).name.split(".", 1)[0]
+    stem = stem[:-len("_preview")] if stem.endswith("_preview") else stem
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT image_id FROM images WHERE image_id = ?", (stem,)).fetchone()
+        return row["image_id"] if row else None
 
 def load_image(image_id: str) -> Optional[ImageMetadata]:
     with closing(_get_conn()) as conn, conn:
@@ -378,6 +416,34 @@ def load_session_updated_at(session_id: str) -> Optional[str]:
         row = conn.execute("SELECT updated_at FROM sessions WHERE session_id = ?",
                            (session_id,)).fetchone()
         return row["updated_at"] if row else None
+
+
+def load_session_version(session_id: str) -> Optional[tuple]:
+    """(updated_at, status): what the SessionManager cache compares against.
+    status is included because it changes without bumping updated_at."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT updated_at, status FROM sessions WHERE session_id = ?",
+                           (session_id,)).fetchone()
+        return (row["updated_at"], row["status"]) if row else None
+
+
+def claim_session_run(session_id: str, now: str, stale_before: str) -> bool:
+    """Atomically idle -> running, across processes (Flask workers, MCP
+    server). A 'running' older than stale_before counts as abandoned."""
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute(
+            "UPDATE sessions SET status = 'running', status_at = ? WHERE session_id = ? "
+            "AND (status != 'running' OR status_at IS NULL OR status_at < ?)",
+            (now, session_id, stale_before))
+        return cur.rowcount == 1
+
+
+def set_session_status(session_id: str, status: str, now: str) -> None:
+    """Status only: never rewrites the rest of the row (which another process
+    may have changed since this one cached it)."""
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE sessions SET status = ?, status_at = ? WHERE session_id = ?",
+                     (status, now, session_id))
 
 
 def load_session(session_id: str) -> Optional[Session]:
@@ -673,6 +739,7 @@ def _pub_row_to_dict(row) -> Dict[str, Any]:
         "latest_version": row["latest_version"],
         "node_count": len(graph.get("nodes") or []),
         "uses_custom_nodes": any(n.get("custom_node_id") for n in graph.get("nodes") or []),
+        "ops": [n.get("op") or "custom" for n in graph.get("nodes") or []],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "latest_published_at": row["latest_published_at"],
@@ -815,3 +882,16 @@ def load_user(user_id: str) -> Optional[Dict[str, Any]]:
     with closing(_get_conn()) as conn, conn:
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+
+def list_users() -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute(
+            "SELECT user_id, username, email, provider, display_name, created_at, last_login "
+            "FROM users ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_user_password(user_id: str, password_hash: str) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", (password_hash, user_id))

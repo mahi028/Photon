@@ -27,6 +27,10 @@ def create_app() -> Flask:
     from .core.auth.oauth import init_oauth
     init_oauth(app)
 
+    from .core.auth.signup_policy import policy as signup_policy
+    if signup_policy.warning():
+        app.logger.warning("SECURITY: %s See core/auth/signup_policy.py.", signup_policy.warning())
+
     # Register blueprints
     from .api.auth_routes import auth_bp
     from .api.upload_routes import upload_bp
@@ -56,13 +60,31 @@ def create_app() -> Flask:
     from flask import send_from_directory
     import os
 
-    @app.route("/previews/<path:filename>")
-    def serve_preview(filename: str):
-        return send_from_directory(config.VOLUMES_DIR, filename)
+    # File routes (D-037). These used to serve anything under volumes/ with
+    # no login (sessions.db included). Now: login required, uploads only via
+    # /previews/uploads/<image file>, outputs only under a session you own.
+    # Anything else is a 404 so existence isn't leaked.
+    from flask import abort
+    from .core.auth.middleware import get_current_user_id, login_required as _login_required
+    from .core.session import store as _store
+    from .core.session.manager import get_manager as _get_manager
 
-    @app.route("/outputs/<path:filename>")
-    def serve_output(filename: str):
-        return send_from_directory(config.OUTPUTS_DIR, filename)
+    @app.route("/previews/uploads/<path:filename>")
+    @_login_required
+    def serve_preview(filename: str):
+        if "/" in filename:
+            abort(404)
+        image_id = _store.image_id_for_upload_file(filename)
+        if not image_id or not _store.user_can_access_image(get_current_user_id(), image_id):
+            abort(404)
+        return send_from_directory(config.UPLOADS_DIR, filename)
+
+    @app.route("/outputs/<session_id>/<path:filename>")
+    @_login_required
+    def serve_output(session_id: str, filename: str):
+        if not _get_manager().get_session_for_user(session_id, get_current_user_id()):
+            abort(404)
+        return send_from_directory(config.OUTPUTS_DIR / session_id, filename)
 
     # Main index route
     from .core.auth.middleware import login_required

@@ -14,6 +14,7 @@ from flask import Blueprint, request, jsonify
 
 from ..config import config
 from ..core.auth.middleware import login_required, get_current_user_id
+from ..core.session import store
 from ..core.session.manager import get_manager
 
 session_bp = Blueprint("sessions", __name__)
@@ -36,6 +37,9 @@ def create_session():
         image_ids = []
 
     title = (data.get("title") or "").strip() or "Untitled"
+    denied = [i for i in image_ids if not store.user_can_access_image(user_id, i)]
+    if denied:
+        return jsonify({"error": f"Image not found: {', '.join(denied)}"}), 404
 
     sess = get_manager().create_session(user_id=user_id, image_ids=image_ids, title=title)
     return jsonify({"session_id": sess.session_id}), 201
@@ -106,6 +110,8 @@ def add_image(session_id: str):
     image_id = (data.get("image_id") or "").strip()
     if not image_id:
         return jsonify({"error": "image_id is required"}), 400
+    if not store.user_can_access_image(get_current_user_id(), image_id):
+        return jsonify({"error": "Image not found"}), 404
     sess = get_manager().add_image(session_id, image_id)
     return jsonify(sess.to_dict()), 200
 
