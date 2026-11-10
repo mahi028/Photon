@@ -123,6 +123,8 @@ def build_system_prompt(metadata: ImageMetadata,
           user painted on the image (0 = unlabeled): use it as y with
           ignore_label=0. To keep a fitted model, end with `ml_save_model(name=...)`;
           later graphs apply it with `ml_load_model(model_id=...)` -> `ml_predict`.
+        - Uploaded deep-learning segmentation models (e.g. tissue/background) run with
+          `segment_with_model(model_id=...)` (outputs mask, probability, labels).
         - Non-image outputs (numbers, threshold arrays, tables) are reported back
           to you after the run.
         - Prefer catalog ops when one fits. If unsure of a library node's port or

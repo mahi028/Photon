@@ -120,7 +120,9 @@ def _csv(text: str, name: str) -> Response:
 @login_required
 def values_csv(batch_id: str):
     try:
-        return _csv(batch.values_csv(get_current_user_id(), batch_id), f"batch_{batch_id[:8]}_values.csv")
+        every = request.args.get("all") == "1"
+        return _csv(batch.values_csv(get_current_user_id(), batch_id, all_values=every),
+                    f"batch_{batch_id[:8]}_{'all_values' if every else 'values'}.csv")
     except batch.BatchError as e:
         return _err(e)
 

@@ -329,18 +329,29 @@ def ml_load_model(model_id=None):
 
 @register(
     name="load_labels", category="ml",
-    inputs=[],
+    inputs=[Port("like", _A, optional=True)],
     outputs=[Port("labels", _A)],
     params=[Param("annotation_id", "str", "",
                   doc="A label image painted in the session view. Empty: the most recent one "
                       "painted on the image being processed.")],
     doc="Labels painted over the input image in the UI (0 = unlabeled, 1..N = classes), as an "
-        "(H, W) int array: y for ml_fit / ml_fit_predict with ignore_label=0.",
+        "(H, W) int array at the image's size: y for ml_fit / ml_fit_predict with ignore_label=0. "
+        "Connect `like` to get them at that array's size instead (e.g. the features of a "
+        "downscaled image).",
 )
-def load_labels(annotation_id=""):
+def load_labels(annotation_id="", like=None):
     path = RUNTIME["assets"].get(f"labels:{annotation_id or ''}")
     if not path:
         raise ValueError("no painted labels for this image" if not annotation_id
                          else f"annotation {annotation_id!r} was not found or is not yours")
     from PIL import Image
-    return {"labels": np.asarray(Image.open(path)).astype(np.int32)}
+    im = Image.open(path)
+    if like is not None:
+        a = np.asarray(like)
+        target = (a.shape[1], a.shape[0])
+    else:
+        w, _, h = str(im.info.get("photon:size", "")).partition("x")
+        target = (int(w), int(h)) if w.isdigit() and h.isdigit() else im.size
+    if im.size != target:
+        im = im.resize(target, Image.NEAREST)        # labels: never interpolate
+    return {"labels": np.asarray(im).astype(np.int32)}

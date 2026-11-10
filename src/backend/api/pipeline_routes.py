@@ -385,17 +385,23 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                   "image_id": image_id, "title": title,
                   "node_count": len(graph.get("nodes") or [])})
 
+            from ..core.models import user_models
             try:
                 assets = saved.stage(run_graph, user_id, image_id, (meta.shape[1], meta.shape[0]))
-            except saved.AssetError as e:
+                grants = user_models.issue_grants(run_graph, user_id)
+            except (saved.AssetError, user_models.SpecError) as e:
                 last_error = str(e)
                 push({"event": "pipeline_error", "image_slot": slot_idx,
                       "failed_node": None, "message": last_error})
                 continue
-            result = sandbox_backend.run_pipeline(
-                run_graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
-                input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets,
-            )
+            try:
+                result = sandbox_backend.run_pipeline(
+                    run_graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
+                    input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets,
+                    model_grants=grants,
+                )
+            finally:
+                user_models.revoke_grants(grants)
             for m in saved.register_saved(user_id, result.get("saved_models") or [],
                                           session_id, title):
                 models_saved.append({**m, "image_slot": slot_idx})

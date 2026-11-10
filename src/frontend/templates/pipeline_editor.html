@@ -245,6 +245,22 @@
                     <p x-show="!savedModels.length" class="text-[10px] text-gray-600 mt-0.5">No saved models yet: end a training graph with ml_save_model and run it.</p>
                   </div>
                 </template>
+                <template x-if="assetParam(p) === 'segmodel'">
+                  <div>
+                    <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
+                            @change="setParam(p.name, $event.target.value, 'str')"
+                            class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                      <option value="">(pick an uploaded model)</option>
+                      <template x-if="paramValue(p.name) && !segModels.find(m => m.model_id === paramValue(p.name))">
+                        <option :value="paramValue(p.name)" x-text="`${String(paramValue(p.name)).slice(0, 8)}… (not in your list)`"></option>
+                      </template>
+                      <template x-for="m in segModels" :key="m.model_id">
+                        <option :value="m.model_id" x-text="`${m.name}${m.spec.modality ? ' · ' + m.spec.modality : ''} · ${m.spec.arch}/${m.spec.encoder}`"></option>
+                      </template>
+                    </select>
+                    <p class="text-[10px] text-gray-600 mt-0.5">Upload models on the <a href="/models" target="_blank" class="text-indigo-400">Models page</a>.</p>
+                  </div>
+                </template>
                 <template x-if="assetParam(p) === 'labels'">
                   <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
                           @change="setParam(p.name, $event.target.value, 'str')"

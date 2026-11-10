@@ -92,9 +92,11 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "",
                            [i.to_dict() for i in issues])
 
     from . import saved
+    from ..models import user_models
     try:
         model_ids = saved.check_publishable(user_id, graph)      # D-044
-    except saved.AssetError as e:
+        seg_model_ids = user_models.check_publishable(user_id, graph)   # D-047
+    except (saved.AssetError, user_models.SpecError) as e:
         raise PublishError(str(e))
 
     snapshot: dict[str, dict] = {}
@@ -124,6 +126,8 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "",
 
     from . import library
     store.mark_models_published(model_ids)
+    for mid in seg_model_ids:
+        store.update_seg_model(mid, published=1)
     version = store.add_published_version(
         published_id, user_id, pipeline_id, title, description, graph, snapshot,
         (changelog or "").strip()[:MAX_CHANGELOG], datetime.utcnow().isoformat(),

@@ -140,3 +140,25 @@ def test_train_save_load_publish(make_user, upload):
     bad = {"nodes": [{"id": "y", "op": "load_labels", "params": {"annotation_id": "a" * 32}}], "edges": []}
     pid2 = c1.post("/api/pipelines", json={"title": "x", "graph": bad}).get_json()["pipeline_id"]
     assert "private" in c1.post(f"/api/pipelines/{pid2}/publish", json={}).get_json()["error"]
+
+
+def test_labels_painted_at_reduced_size(make_user, upload):
+    """Whole-slide labels are painted small; load_labels scales them up (nearest)."""
+    c, _, _ = make_user()
+    iid = upload(c)                                     # 128 x 96
+    small = _scribbles()[::2, ::2]                      # 64 x 48
+    r = c.post("/api/annotations", json={"image_id": iid, "png": _png(small)})
+    assert r.status_code == 201, r.get_json()
+    a = r.get_json()
+    assert a["painted_size"] == [64, 48] and a["counts"] == {"1": 96, "2": 252}
+    assert c.post("/api/annotations", json={"image_id": iid, "png": _png(np.zeros((48, 40)))}).status_code == 400
+    path = str(saved.annotation_path(a["annotation_id"]))
+    ml.RUNTIME["assets"] = {"labels:": path}
+    try:
+        full = ml.load_labels()["labels"]
+        assert full.shape == (96, 128) and set(np.unique(full)) == {0, 1, 2}
+        assert (full[::2, ::2] == small).all(), "nearest-neighbour, no new label values"
+        like = ml.load_labels(like=np.zeros((24, 32, 5)))["labels"]
+        assert like.shape == (24, 32)
+    finally:
+        ml.RUNTIME["assets"] = {}

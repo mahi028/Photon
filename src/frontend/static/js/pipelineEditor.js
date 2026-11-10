@@ -56,6 +56,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
     subSpecs: {},         // "<published_id>@<version>" -> node interface (D-045)
     publishedList: [],
     savedModels: [],
+    segModels: [],
     savedLabels: [],
     _assetsLoading: false,
 
@@ -405,6 +406,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       const op = this.selectedSpec && this.selectedSpec.name;
       if (op === 'ml_load_model' && p.name === 'model_id') { this._loadAssets(); return 'model'; }
       if (op === 'load_labels' && p.name === 'annotation_id') { this._loadAssets(); return 'labels'; }
+      if (op === 'segment_with_model' && p.name === 'model_id') { this._loadAssets(); return 'segmodel'; }
       return null;
     },
 
@@ -415,6 +417,8 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         .then(d => { this.savedModels = d.models || []; });
       fetch('/api/annotations').then(r => r.ok ? r.json() : {annotations: []})
         .then(d => { this.savedLabels = d.annotations || []; });
+      fetch('/api/seg-models').then(r => r.ok ? r.json() : {models: []})
+        .then(d => { this.segModels = (d.models || []).filter(m => m.status === 'ready'); });
     },
 
     setParam(name, value, kind) {

@@ -206,16 +206,23 @@ def _clean_classes(classes: Any) -> list[dict]:
 
 
 def decode_labels(png: bytes, size: tuple[int, int]) -> np.ndarray:
-    """PNG bytes -> (H, W) uint8 labels. Accepts L, P (palette index = label)
-    or RGBA where the alpha=0 pixels are unlabeled and the red channel holds the label."""
+    """PNG bytes -> (h, w) uint8 labels. Accepts L, P (palette index = label)
+    or RGBA where the alpha=0 pixels are unlabeled and the red channel holds the label.
+
+    The labels may be painted at a reduced size (whole-slide images are too big
+    to paint at full resolution in a browser): any size up to the image's with
+    the same aspect ratio. load_labels scales them back up, nearest-neighbour."""
     from PIL import Image
     try:
         im = Image.open(io.BytesIO(png))
         im.load()
     except Exception:
         raise AssetError("labels must be a PNG image") from None
-    if im.size != tuple(size):
-        raise AssetError(f"labels are {im.size[0]}x{im.size[1]} but the image is {size[0]}x{size[1]}")
+    w, h = im.size
+    W, H = size
+    if w > W or h > H or abs(h - w * H / W) > 1.0:          # same aspect, ±1 px rounding
+        raise AssetError(f"labels are {w}x{h} but the image is {W}x{H}: use the image's size, "
+                         "or a smaller one with the same aspect ratio")
     if im.mode in ("L", "P"):
         a = np.asarray(im)
     elif im.mode in ("RGBA", "LA"):
@@ -241,8 +248,11 @@ def save_annotation(user_id: str, image_id: str, png: bytes, image_size: tuple[i
     else:
         annotation_id, created = uuid.uuid4().hex, now
     from PIL import Image
+    from PIL import PngImagePlugin
     tmp = annotation_path(annotation_id).with_suffix(".tmp.png")
-    Image.fromarray(labels, mode="L").save(tmp)
+    info = PngImagePlugin.PngInfo()
+    info.add_text("photon:size", f"{image_size[0]}x{image_size[1]}")   # the image's size, for load_labels
+    Image.fromarray(labels, mode="L").save(tmp, pnginfo=info)
     tmp.replace(annotation_path(annotation_id))
     store.upsert_annotation({"annotation_id": annotation_id, "user_id": user_id, "image_id": image_id,
                              "name": (name or "").strip()[:MAX_NAME_LEN] or "labels",
@@ -250,7 +260,9 @@ def save_annotation(user_id: str, image_id: str, png: bytes, image_size: tuple[i
                              "classes": _clean_classes(classes), "created_at": created,
                              "updated_at": now})
     out = store.get_annotation(annotation_id)
-    out["counts"] = {int(v): int(c) for v, c in zip(*np.unique(labels, return_counts=True)) if v}
+    scale = (image_size[0] * image_size[1]) / max(1, labels.size)          # painted at reduced size
+    out["counts"] = {int(v): int(round(c * scale)) for v, c in zip(*np.unique(labels, return_counts=True)) if v}
+    out["painted_size"] = [labels.shape[1], labels.shape[0]]
     return out
 
 

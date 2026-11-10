@@ -225,8 +225,9 @@ def _page_csv(text: str, offset: int, limit: int) -> dict:
             "offset": offset, "next_offset": offset + len(page) if offset + len(page) < len(body) else None}
 
 
-def values_page(user_id: str, batch_id: str, offset: int = 0, limit: int = 1000) -> dict:
-    return _page_csv(values_csv(user_id, batch_id), offset, limit)
+def values_page(user_id: str, batch_id: str, offset: int = 0, limit: int = 1000,
+                all_values: bool = False) -> dict:
+    return _page_csv(values_csv(user_id, batch_id, all_values), offset, limit)
 
 
 def table_page(user_id: str, batch_id: str, key: str, offset: int = 0, limit: int = 1000) -> dict:
@@ -291,14 +292,20 @@ def _run_item(batch_id: str, idx: int, image_id: str) -> None:
     out_dir = batch_dir(batch_id) / f"{idx:05d}"
     shutil.rmtree(out_dir, ignore_errors=True)
     node_dir = out_dir / "nodes"
+    from ..models import user_models
     try:
         assets = saved.stage(ctx["graph"], ctx["user_id"], image_id, (meta.shape[1], meta.shape[0]))
-    except saved.AssetError as e:
+        grants = user_models.issue_grants(ctx["graph"], ctx["user_id"])
+    except (saved.AssetError, user_models.SpecError) as e:
         store.update_batch_item(batch_id, idx, status="failed", error=str(e), seconds=time.time() - t0)
         return
-    result = sandbox_backend.run_pipeline(
-        ctx["graph"], meta.path, str(out_dir), str(node_dir), custom_nodes=ctx["customs"],
-        input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets, export_tables=True)
+    try:
+        result = sandbox_backend.run_pipeline(
+            ctx["graph"], meta.path, str(out_dir), str(node_dir), custom_nodes=ctx["customs"],
+            input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets, export_tables=True,
+            model_grants=grants)
+    finally:
+        user_models.revoke_grants(grants)
     preview = _main_preview(result, out_dir)
     shutil.rmtree(node_dir, ignore_errors=True)  # other node previews aren't kept
     if ctx["outer"]:
@@ -459,7 +466,8 @@ def get(user_id: str, batch_id: str, with_items: bool = True) -> dict:
         for it in items:
             it["input_preview"] = _input_preview_url(it["image_id"])
         out["items"] = items
-        out["columns"] = value_columns(items)
+        out["columns"] = value_columns(items, b["graph"])
+        out["all_columns"] = value_columns(items)
         out["tables"] = table_keys(items)
     return out
 
@@ -472,26 +480,40 @@ def _flat(v: Any) -> Any:
     return json.dumps(v)[:500]
 
 
-def value_columns(items: list[dict]) -> list[str]:
-    """node.port columns for the per-image values table. Values exported as
-    tables (per-object rows) are left out: they have their own CSV."""
+def result_nodes(graph: dict) -> set[str]:
+    """Nodes nothing else reads: a graph's results. Intermediate numbers
+    (pixel counts feeding a ratio...) are not."""
+    read = {e["from"][0] for e in graph.get("edges") or [] if isinstance(e.get("from"), list)}
+    return {n["id"] for n in graph.get("nodes") or [] if n.get("id") and n["id"] not in read}
+
+
+def value_columns(items: list[dict], graph: dict | None = None) -> list[str]:
+    """node.port columns for the per-image values table: only result nodes
+    when `graph` is given (falling back to all if none has a value). Values
+    exported as tables (per-object rows) are left out: they have their own CSV."""
     tabled = {f"{t['node_id']}.{t['port']}" for it in items for t in it.get("tables") or []}
+    keep = result_nodes(graph) if graph else None
     cols: list[str] = []
     for it in items:
         for nid, ports in (it.get("values") or {}).items():
             if "/" in nid:
                 continue                     # inner nodes of a pipeline node: reported on it
+            if keep is not None and nid not in keep:
+                continue
             for port in ports:
                 key = f"{nid}.{port}"
                 if key not in cols and key not in tabled:
                     cols.append(key)
+    if graph and not cols:
+        return value_columns(items)
     return cols
 
 
-def values_csv(user_id: str, batch_id: str) -> str:
-    _owned(user_id, batch_id)
+def values_csv(user_id: str, batch_id: str, all_values: bool = False) -> str:
+    """One row per image. Result values only, unless all_values."""
+    b = _owned(user_id, batch_id)
     items = store.list_batch_items(batch_id)
-    cols = value_columns(items)
+    cols = value_columns(items, None if all_values else b["graph"])
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["index", "filename", "image_id", "status", "seconds", "error", *cols])
@@ -567,6 +589,7 @@ def zip_all(user_id: str, batch_id: str) -> Path:
     safe = lambda s: "".join(c if c.isalnum() or c in "-_." else "_" for c in str(s))[:80]
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("values.csv", values_csv(user_id, batch_id))
+        zf.writestr("all_values.csv", values_csv(user_id, batch_id, all_values=True))
         for t in b["tables"]:
             zf.writestr(f"tables/{safe(t['key'])}.csv", table_csv(user_id, batch_id, t["key"]))
         for it in b["items"]:

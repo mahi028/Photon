@@ -30,6 +30,10 @@ dependencies = [
 mcp = [
     "mcp>=2.3,<3",
 ]
+models = [
+    "segmentation-models-pytorch>=0.4",
+    "timm>=0.9",
+]
 
 # PyTorch must come from the CUDA 12.1 build index — the default PyPI wheels
 # don't work in this container. `explicit = true` means ONLY the packages

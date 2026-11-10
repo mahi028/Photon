@@ -151,6 +151,11 @@ def shutdown() -> None:
         pass
 
 
+# {model_id: token} for uploaded models this run may use; set by the pipeline
+# child from its job (executor._CHILD). See core/models/user_models.py.
+GRANTS: dict[str, str] = {}
+
+
 def run_model_op(op_name: str, inputs: dict[str, np.ndarray],
                  params: dict[str, Any]) -> dict[str, np.ndarray]:
     """Execute a model op in the sidecar and return its output arrays.
@@ -171,6 +176,8 @@ def run_model_op(op_name: str, inputs: dict[str, np.ndarray],
             written.append(p)
             in_paths[port] = str(p)
 
+        if op_name == "segment_with_model":      # uploaded model: carry this run's grant (D-047)
+            params = {**params, "_grant": GRANTS.get(str(params.get("model_id")))}
         resp = request({
             "cmd": "run_op", "op": op_name, "params": params,
             "inputs": in_paths, "out_dir": str(ipc_dir),

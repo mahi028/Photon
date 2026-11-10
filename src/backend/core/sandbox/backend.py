@@ -40,9 +40,13 @@ def get_executor() -> Executor:
 def run_pipeline(graph: dict, input_path: str, output_dir: str, node_preview_dir: str,
                  custom_nodes: dict | None = None, timeout: Optional[int] = None,
                  input_mode: str = "RGB", assets: dict[str, str] | None = None,
-                 export_tables: bool = False) -> dict[str, Any]:
+                 export_tables: bool = False, model_grants: dict[str, str] | None = None) -> dict[str, Any]:
     """Run a pipeline graph against one image (see executor.run_pipeline_subprocess)."""
     if mode() == "remote":
+        if model_grants:
+            return {"error": "Uploaded segmentation models run only with PHOTON_SANDBOX=local "
+                             "(their weights stay on this host).", "failed_node": None, "events": [],
+                    "previews": {}, "finals": [], "timed_out": False, "time_taken_seconds": 0}
         from .remote import run_pipeline_remote
         return run_pipeline_remote(graph, input_path, output_dir, node_preview_dir,
                                    custom_nodes=custom_nodes, timeout=timeout, input_mode=input_mode,
@@ -50,4 +54,5 @@ def run_pipeline(graph: dict, input_path: str, output_dir: str, node_preview_dir
     from ..pipeline.executor import run_pipeline_subprocess
     return run_pipeline_subprocess(graph, input_path, output_dir, node_preview_dir,
                                    custom_nodes=custom_nodes, timeout=timeout, input_mode=input_mode,
-                                   assets=assets, export_tables=export_tables)
+                                   assets=assets, export_tables=export_tables,
+                                   model_grants=model_grants)

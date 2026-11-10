@@ -91,6 +91,8 @@ INSTRUCTIONS = (
         "A published pipeline can be a node in your graph: {\"id\": \"s\", \"pipeline\": {\"published_id\": ..., "
         "\"version\": N}, \"params\": {\"<inner node>.<param>\": value}}; input 'image', outputs = its last "
         "nodes' ports (validate_pipeline lists them). "
+        "Uploaded deep-learning segmentation models (e.g. tissue masks) run with the "
+        "segment_with_model node (list_seg_models; add one with register_seg_model). "
         "For many images: upload_images (a zip or a folder) -> run_batch -> poll get_batch -> "
         "get_batch_results (CSV). describe_op('pipeline:<published_id>') shows a published "
         "pipeline's ports for use as a node. "
@@ -859,9 +861,10 @@ def upload_images(zip_base64: str | None = None, zip_url: str | None = None,
 
 @_tool(scope="read", annotations=_RO)
 def get_batch_results(batch_id: str, table: str | None = None, offset: int = 0,
-                      limit: int = 1000) -> dict:
+                      limit: int = 1000, all_values: bool = False) -> dict:
     """A batch's results as CSV text, paged. Without `table`: one row per image
-    (index, filename, status, seconds, error, then a column per node.port value).
+    (index, filename, status, seconds, error, then a column per node.port value of the
+    graph's result nodes, i.e. nodes nothing else reads; all_values=True adds intermediates).
     With table="<node>.<port>" (names from get_batch's `tables`): that table from
     every image, e.g. regionprops objects, each row tagged with its image. Page
     with offset / next_offset."""
@@ -869,10 +872,68 @@ def get_batch_results(batch_id: str, table: str | None = None, offset: int = 0,
     try:
         if table:
             return batch.table_page(_uid(), batch_id, table, offset, limit)
-        out = batch.values_page(_uid(), batch_id, offset, limit)
+        out = batch.values_page(_uid(), batch_id, offset, limit, all_values)
         out["tables"] = batch.get(_uid(), batch_id)["tables"]
         return out
     except batch.BatchError as e:
+        raise ToolError(str(e))
+
+
+@_tool(scope="read", annotations=_RO)
+def list_seg_models() -> dict:
+    """Your uploaded segmentation models (status checking / ready / failed). Run one in a
+    graph with the segment_with_model node: {"op": "segment_with_model", "params":
+    {"model_id": ...}} -> outputs mask, probability, labels."""
+    from src.backend.core.models import user_models
+    return {"models": [user_models.public(r) for r in store.list_seg_models(_uid())]}
+
+
+@_tool(scope="read", annotations=_RO)
+def get_seg_model(model_id: str) -> dict:
+    """One uploaded segmentation model; poll after register_seg_model until status is
+    ready (or failed, with the reason)."""
+    from src.backend.core.models import user_models
+    row = store.get_seg_model(model_id)
+    if not row or row["user_id"] != _uid() or row["deleted_at"]:
+        raise ToolError("Model not found.")
+    return user_models.public(row)
+
+
+@_tool(scope="write")
+def register_seg_model(spec: dict, weights_path: str | None = None, weights_url: str | None = None,
+                       weights_base64: str | None = None, filename: str | None = None) -> dict:
+    """Upload a segmentation model: weights (a state_dict; .pt/.pth/.bin/.ckpt/.safetensors)
+    plus a spec. No code is uploaded: Photon builds the network from an allow-listed
+    segmentation_models_pytorch architecture and loads the weights as tensors only.
+
+    spec: {"name", "arch": Segformer|Unet|UnetPlusPlus|DeepLabV3|DeepLabV3Plus|FPN|Linknet|
+    PSPNet|MAnet|PAN|UPerNet, "encoder": e.g. "mit_b0", "in_channels": 3, "classes": 1,
+    "activation": sigmoid|softmax, "input_size": [H, W] (multiples of 32), "normalize":
+    imagenet|zero_one|custom (+ "mean", "std"), "color": rgb|bgr|gray, "threshold": 0.5,
+    "foreground_class": 1, "postprocess": {"closing_radius", "min_component_frac",
+    "fill_holes", "smooth"}, "modality": e.g. "histology", "description"}.
+    Weights from one of: weights_path (server disk, allow-listed dirs over HTTP),
+    weights_url, weights_base64 (+ filename). The model is checked (load + forward pass)
+    in the background: poll get_seg_model."""
+    from src.backend.core.models import user_models
+    if sum(map(bool, (weights_path, weights_url, weights_base64))) != 1:
+        raise ToolError("Provide exactly one of weights_path, weights_url or weights_base64.")
+    if weights_path:
+        data, name = _read_local(weights_path)
+    elif weights_url:
+        try:
+            data, name = fetch_url(weights_url)
+        except FetchError as e:
+            raise ToolError(str(e))
+    else:
+        try:
+            data = base64.b64decode(weights_base64.split(",", 1)[-1], validate=True)
+        except (binascii.Error, ValueError):
+            raise ToolError("weights_base64 is not valid base64.")
+        name = filename or "weights.pth"
+    try:
+        return user_models.create(_uid(), spec, filename or name, io.BytesIO(data))
+    except user_models.SpecError as e:
         raise ToolError(str(e))
 
 

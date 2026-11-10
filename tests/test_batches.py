@@ -76,6 +76,7 @@ def test_batch_end_to_end(make_user, disk_png):
     assert b["status"] == "done" and b["done"] == 3 and b["failed"] == 0, b
     assert "n.number" in b["columns"] and b["tables"][0]["key"] == "p.out_dict"
     assert "p.out_dict" not in b["columns"], "tables get their own CSV, not a JSON blob column"
+    assert "l.num" not in b["columns"] and "l.num" in b["all_columns"], "intermediates only in all values"
     assert all(it["outputs"] for it in b["items"])
     assert all(it["input_preview"].startswith("/previews/uploads/") for it in b["items"])
     assert all(it["preview"] and it["preview"]["node_id"] for it in b["items"]), "last image made is kept"

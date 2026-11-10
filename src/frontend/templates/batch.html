@@ -40,7 +40,9 @@
             <div class="h-full bg-red-500 transition-all" :style="`width: ${100 * b.failed / Math.max(1, b.total)}%`"></div>
           </div>
           <div class="flex flex-wrap gap-2 pt-1">
-            <a :href="`/api/batches/${id}/values.csv`" class="btn-secondary text-xs">Values CSV</a>
+            <a :href="`/api/batches/${id}/values.csv`" class="btn-secondary text-xs" title="Result values: nodes nothing else reads">Values CSV</a>
+            <a x-show="(b.all_columns || []).length > (b.columns || []).length" :href="`/api/batches/${id}/values.csv?all=1`"
+               class="btn-secondary text-xs" title="Every node's values, intermediates included">All values CSV</a>
             <template x-for="t in (b.tables || [])" :key="t.key">
               <a :href="`/api/batches/${id}/table.csv?key=${encodeURIComponent(t.key)}`" class="btn-secondary text-xs"
                  :title="`${t.rows} rows from ${t.images} images`" x-text="`${t.key} CSV`"></a>

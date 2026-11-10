@@ -48,6 +48,8 @@ def create_app() -> Flask:
             _recovered["done"] = True
             from .core.pipeline import batch as _batch
             threading.Thread(target=_batch.recover, name="batch-recover", daemon=True).start()
+            from .core.models import user_models as _um
+            threading.Thread(target=_um.recheck_stuck, name="model-recheck", daemon=True).start()
 
     # Register blueprints
     from .api.auth_routes import auth_bp
@@ -63,6 +65,7 @@ def create_app() -> Flask:
     from .api.api_key_routes import api_key_bp
     from .api.saved_routes import saved_bp
     from .api.batch_routes import batch_bp
+    from .api.seg_model_routes import seg_model_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(llm_bp, url_prefix="/api")
@@ -76,6 +79,7 @@ def create_app() -> Flask:
     app.register_blueprint(api_key_bp, url_prefix="/api")
     app.register_blueprint(saved_bp, url_prefix="/api")
     app.register_blueprint(batch_bp, url_prefix="/api")
+    app.register_blueprint(seg_model_bp, url_prefix="/api")
     app.register_blueprint(shared_bp)
 
     # Serve preview images from volumes/uploads
@@ -130,6 +134,12 @@ def create_app() -> Flask:
     def api_keys_view():
         from flask import render_template
         return render_template("api_keys.html", mcp_public_url=config.MCP_PUBLIC_URL)
+
+    @app.route("/models")
+    @login_required
+    def seg_models_view():
+        from flask import render_template
+        return render_template("seg_models.html")
 
     @app.route("/batches")
     @login_required

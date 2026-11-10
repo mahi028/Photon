@@ -12,10 +12,13 @@
 const LABEL_COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#eab308', '#a855f7',
                       '#f97316', '#06b6d4', '#ec4899', '#84cc16'];
 
+const PAINT_MAX = 2048;
+
 function labelPainter() {
   return {
     image: null,          // {image_id, preview_url, metadata}
-    W: 0, H: 0,
+    W: 0, H: 0,           // painting size
+    FW: 0, FH: 0,         // the image's full size
     labels: null,         // Uint8Array(W*H)
     overlay: null,        // ImageData for the overlay canvas
     classes: [],
@@ -46,7 +49,12 @@ function labelPainter() {
     async start(image) {
       this.image = image;
       const shape = (image.metadata && image.metadata.shape) || [];
-      this.H = shape[0]; this.W = shape[1];
+      // Paint at most PAINT_MAX px on the long side: a whole-slide image at
+      // full resolution is far too big for a browser canvas. The server keeps
+      // the image's size and load_labels scales the labels back up.
+      this.FH = shape[0]; this.FW = shape[1];
+      const s = Math.min(1, PAINT_MAX / Math.max(this.FW, this.FH));
+      this.W = Math.max(1, Math.round(this.FW * s)); this.H = Math.max(1, Math.round(this.FH * s));
       this.error = '';
       this.undoStack = [];
       this.dirty = false;
@@ -82,7 +90,8 @@ function labelPainter() {
       const c = document.createElement('canvas');
       c.width = this.W; c.height = this.H;
       const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0);
+      ctx.imageSmoothingEnabled = false;            // labels: nearest only
+      ctx.drawImage(img, 0, 0, this.W, this.H);
       const px = ctx.getImageData(0, 0, this.W, this.H).data;
       for (let i = 0; i < this.labels.length; i++) this.labels[i] = px[i * 4];
       this.annotationId = a.annotation_id;

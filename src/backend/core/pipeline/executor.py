@@ -41,6 +41,7 @@ from PIL import Image  # noqa: E402
 # down before any custom node code is compiled or run (D-036).
 _INPUT = np.asarray(Image.open(JOB["input_path"]).convert(JOB["input_mode"]))
 import src.backend.core.models.sidecar  # noqa: E402,F401  (model ops import it lazily)
+src.backend.core.models.sidecar.GRANTS = JOB.get("model_grants") or {}   # uploaded models (D-047)
 from src.backend.core.pipeline.ops import ml as _ml  # noqa: E402
 _ml.RUNTIME["assets"] = JOB.get("assets") or {}       # staged saved models / labels (D-044)
 _ml.RUNTIME["save_dir"] = str(Path(JOB["output_dir"]) / "models")
@@ -49,6 +50,16 @@ if any(n.get("op") in ("ml_save_model", "ml_load_model") for n in JOB["graph"].g
     import sklearn.utils.validation  # noqa: E402,F401
 guard.install(read_roots=guard.default_read_roots() + JOB["read_roots"],
               write_roots=JOB["write_roots"], unix_sockets=JOB["unix_sockets"])
+
+PREVIEW_MAX = 1024
+
+def _shrink(value):
+    """Node previews are for looking at: subsample big arrays (every k-th
+    pixel) before converting, so a 10k-px slide doesn't cost a full-size JPEG
+    per node. Final outputs are still saved at full resolution."""
+    a = np.asarray(value)
+    k = int(np.ceil(max(a.shape[:2]) / PREVIEW_MAX))
+    return a[::k, ::k] if k > 1 else a
 
 def _to_preview_array(value):
     """Best-effort conversion of any port value to a saveable uint8 image."""
@@ -172,7 +183,7 @@ def main():
             port, value = images[0]
             try:
                 p = node_dir / f"{_fname(nid)}.jpg"
-                Image.fromarray(_to_preview_array(value)).convert("RGB").save(p, quality=85)
+                Image.fromarray(_to_preview_array(_shrink(value))).convert("RGB").save(p, quality=85)
                 previews[nid] = {"port": port, "path": str(p)}
             except Exception:
                 pass   # a preview failing must never fail the run
@@ -187,7 +198,9 @@ def main():
                 continue            # reported in `values`, not saved as an image
             out_path = Path(JOB["output_dir"]) / f"{_fname(nid)}_{port}.png"
             Path(JOB["output_dir"]).mkdir(parents=True, exist_ok=True)
-            Image.fromarray(_to_preview_array(value)).save(out_path)
+            # compress_level 1: several times faster than the default 6 on
+            # big outputs, files somewhat larger.
+            Image.fromarray(_to_preview_array(value)).save(out_path, compress_level=1)
             finals.append({"node_id": nid, "port": port, "path": str(out_path)})
 
     json.dump({
@@ -232,6 +245,7 @@ def run_pipeline_subprocess(
     input_mode: str = "RGB",
     assets: dict[str, str] | None = None,
     export_tables: bool = False,
+    model_grants: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute a graph out-of-process. Returns the child's result manifest
     plus wall-clock timing, or a synthetic error dict on timeout/crash.
@@ -273,6 +287,7 @@ def run_pipeline_subprocess(
         "repo_root": repo_root,
         "assets": staged,
         "export_tables": bool(export_tables),
+        "model_grants": model_grants or {},
         "graph": graph,
         "custom_nodes": custom_nodes or {},
         "input_path": input_path,

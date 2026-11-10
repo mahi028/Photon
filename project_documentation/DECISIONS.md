@@ -486,3 +486,24 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
   - Pages `/batches` and `/batches/<id>`, and a "Batch…" button in the editor.
   - MCP: `upload_images` (a zip as base64 or URL, or server paths/folders), `run_batch`, `get_batch`, `get_batch_results` (values CSV or one table, paged as CSV text) and `cancel_batch`.
   - `describe_op("pipeline:<published_id>[@v]")` gives a published pipeline's node interface and the exact node JSON.
+
+## D-047 — Uploaded segmentation models (weights + spec, no code)
+
+**Decision.** Users add their own segmentation networks (e.g. a SegFormer tissue/background model) from the **Models** page or over MCP (`register_seg_model`), and run them with one generic node, `segment_with_model(model_id)`. The node outputs `mask`, `probability` and `labels`.
+
+**Why not code upload.** Model ops run in the model sidecar, which has the GPU and **no sandbox**. Running uploaded Python there, or unpickling an uploaded checkpoint with plain `torch.load`, would be arbitrary code on the host. So only data is accepted:
+- **Spec.** An allow-listed `segmentation_models_pytorch` architecture (Segformer, Unet, Unet++, DeepLabV3/+, FPN, Linknet, PSPNet, MAnet, PAN, UPerNet) with an encoder name, built by Photon with `encoder_weights=None`, so nothing is downloaded. Plus in_channels, classes, sigmoid or softmax (with a foreground class), input size (multiples of 32), normalisation (ImageNet / 0–1 / custom mean and std), colour order, threshold, and post-processing from fixed options (closing radius, minimum component fraction, hole filling, smoothing).
+- **Weights.** A state_dict read with `safetensors` or `torch.load(weights_only=True)`, which rebuilds tensors and plain containers only. Common wrappers (`state_dict`, `model`, …) and `module.` prefixes are unwrapped. Up to `PHOTON_MAX_MODEL_MB` (500), and browser uploads also obey `MAX_UPLOAD_MB`.
+- **Check.** On upload, a separate CPU-only process builds the network, loads the weights strictly and runs one forward pass at the input size, checking the output shape. Status goes `checking` → `ready` or `failed` (with the reason). Uploads interrupted by a restart are checked again.
+
+**Running.** The sidecar resolves `user:<model_id>` from the database (`registry.get_model_spec`), so ModelManager's lazy load, idle unload and VRAM budget apply as for built-in models. Pre- and post-processing are fixed Photon code in `ops/models.py` that follows the spec.
+
+**Access: per-run grants.** The pipeline child runs untrusted custom-node code and can talk to the sidecar socket, so the sidecar can't trust a `model_id` from it.
+- Before a run, the parent checks the user may use each model (owner, or published) and writes a grant file to `volumes/model_grants/<token>`, a directory the sandboxed child can neither read nor write.
+- The child only carries the token. The sidecar refuses an uploaded model without a matching, unexpired grant.
+- Grants are revoked when the run ends.
+
+**Publishing and limits.**
+- Publishing a pipeline marks its uploaded models published, so others can run it. Deleting a published model hides it but keeps the weights.
+- Uploaded models run only with `PHOTON_SANDBOX=local`: the weights stay on this host.
+- Dependencies come in the optional extra `models` (`segmentation-models-pytorch>=0.4`, which added `Segformer`, and `timm`). Use `uv sync --extra mcp --extra models`.
