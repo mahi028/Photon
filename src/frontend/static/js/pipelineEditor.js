@@ -53,6 +53,8 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
     // --- lifecycle -------------------------------------------------------
 
+    subSpecs: {},         // "<published_id>@<version>" -> node interface (D-045)
+    publishedList: [],
     savedModels: [],
     savedLabels: [],
     _assetsLoading: false,
@@ -101,6 +103,10 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         if (this.sessions.length) this.selectedSessionId = this.sessions[0].session_id;
       }
       await this._loadLibrarySpecs((this.pipeline.graph?.nodes || []).map(n => n.op));
+      await Promise.all((this.pipeline.graph?.nodes || []).filter(n => n.pipeline)
+        .map(n => this._loadSubSpec(n.pipeline)));
+      fetch('/api/published').then(r => r.ok ? r.json() : [])
+        .then(list => { this.publishedList = list || []; });
       this.$watch('paletteFilter', () => this._searchLibrary());
 
       this._initDrawflow();
@@ -136,6 +142,10 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       if (data.custom_node_id) {
         const cn = this.customById[data.custom_node_id];
         return cn ? cn.ports : {inputs: [], outputs: []};
+      }
+      if (data.pipeline) {
+        const sp = this.subSpecs[this._subKey(data.pipeline)];
+        return sp ? {inputs: sp.inputs, outputs: sp.outputs} : {inputs: [], outputs: []};
       }
       const spec = this.opsByName[data.op];
       return spec ? {inputs: spec.inputs, outputs: spec.outputs} : {inputs: [], outputs: []};
@@ -204,6 +214,34 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       return name.startsWith('lib:') ? name.slice(name.lastIndexOf('.') + 1) : name;
     },
 
+    // --- published pipelines as nodes (D-045) ------------------------------
+
+    _subKey(ref) { return `${ref.published_id}@${ref.version}`; },
+
+    async _loadSubSpec(ref) {
+      const key = this._subKey(ref);
+      if (this.subSpecs[key]) return this.subSpecs[key];
+      const q = ref.version ? `?version=${ref.version}` : '';
+      const res = await fetch(`/api/published/${ref.published_id}/node${q}`);
+      if (!res.ok) return null;
+      const itf = await res.json();
+      const spec = {...itf, name: `pipeline: ${itf.title} v${itf.version}`, subpipeline: true,
+                    library: {}, doc: itf.doc || `Published by ${itf.owner}`};
+      this.subSpecs[this._subKey(itf)] = spec;
+      if (!ref.version) this.subSpecs[key] = spec;
+      return spec;
+    },
+
+    async addPipelineNode(pub) {
+      const spec = await this._loadSubSpec({published_id: pub.published_id});
+      if (!spec) { this._toast('Could not load that pipeline.', 'error'); return; }
+      const nodeId = `${(pub.title || 'pipeline').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20)}_${Math.random().toString(36).slice(2, 6)}`;
+      this._addNode({our_id: nodeId, pipeline: {published_id: spec.published_id, version: spec.version},
+                     label: spec.name, params: {}},
+                    spec.inputs.length, spec.outputs.length, 240 + Math.random() * 120, 80 + Math.random() * 220);
+      this.dirty = true;
+    },
+
     // --- palette ---------------------------------------------------------
 
     get paletteGroups() {
@@ -221,6 +259,12 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         inputs: c.ports.inputs, outputs: c.ports.outputs, params: c.params || [],
         custom_node_id: c.custom_node_id,
       }));
+      const pubs = this.publishedList.filter(p => !p.unpublished_at && (!q
+        || [p.title, p.description, p.owner].some(f => (f || '').toLowerCase().includes(q))));
+      if (pubs.length) groups['published pipelines'] = pubs.slice(0, 30).map(p => ({
+        name: p.title, category: 'published', doc: `${p.owner} · v${p.latest_version}${p.description ? ' · ' + p.description : ''}`,
+        inputs: [], outputs: [], params: [], published_id: p.published_id,
+      }));
       for (const op of this.libraryResults) {
         (groups[`library · ${op.category}`] = groups[`library · ${op.category}`] || []).push(op);
       }
@@ -229,6 +273,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
     addOpNode(op) {
       if (this.isPreset) return;
+      if (op.published_id) { this.addPipelineNode(op); return; }
       if (op.library) this.opsByName[op.name] = op;
       const nodeId = `${this.shortName(op.name)}_${Math.random().toString(36).slice(2, 7)}`;
       const params = {};
@@ -254,9 +299,11 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
     _addNode(data, nIn, nOut, x, y) {
       const ports = data.op === INPUT_OP
         ? {inputs: [], outputs: [{name: 'image', type: 'IMAGE_ANY'}]}
-        : (data.custom_node_id
-            ? this.customById[data.custom_node_id].ports
-            : {inputs: this.opsByName[data.op].inputs, outputs: this.opsByName[data.op].outputs});
+        : (data.pipeline
+            ? this._portsOf({data})
+            : (data.custom_node_id
+                ? this.customById[data.custom_node_id].ports
+                : {inputs: this.opsByName[data.op].inputs, outputs: this.opsByName[data.op].outputs}));
 
       const esc = (t) => String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
       const inLabels = ports.inputs.map(p =>
@@ -265,7 +312,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         `<div class="df-port-label df-out">${p.name}<span class="df-port-type">${p.type}</span></div>`).join('');
       const isInput = data.op === INPUT_OP;
       const html = `
-        <div class="df-node ${isInput ? 'df-node-input' : ''}">
+        <div class="df-node ${isInput ? 'df-node-input' : ''} ${data.pipeline ? 'df-node-sub-pipeline' : ''}">
           <div class="df-node-title" title="${esc(data.label)}">${esc(data.label.startsWith('lib:') ? this.shortName(data.label) : data.label)}</div>
           ${data.label.startsWith('lib:') ? `<div class="df-node-sub">${esc(data.label.slice(4, data.label.lastIndexOf('.')))}</div>` : ''}
           <div class="df-node-ports">
@@ -304,6 +351,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         const cn = this.customById[d.custom_node_id];
         return cn ? {name: cn.name, params: cn.params || [], doc: cn.doc} : null;
       }
+      if (d.pipeline) return this.subSpecs[this._subKey(d.pipeline)] || null;
       return this.opsByName[d.op] || null;
     },
 
@@ -404,6 +452,7 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         if (d.op === INPUT_OP) continue;   // implicit on the server side
         const node = {id: idOf[dfId], params: d.params || {}};
         if (d.custom_node_id) node.custom_node_id = d.custom_node_id;
+        else if (d.pipeline) node.pipeline = d.pipeline;
         else node.op = d.op;
         node.pos = {x: n.pos_x, y: n.pos_y};   // round-trips layout; server ignores it
         nodes.push(node);
@@ -442,19 +491,23 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
       (graph.nodes || []).forEach((node, i) => {
         const isCustom = !!node.custom_node_id;
-        const spec = isCustom ? this.customById[node.custom_node_id] : this.opsByName[node.op];
+        const isSub = !!node.pipeline;
+        const spec = isSub ? this.subSpecs[this._subKey(node.pipeline)]
+          : (isCustom ? this.customById[node.custom_node_id] : this.opsByName[node.op]);
         if (!spec) {
           this.issues.push({node_id: node.id,
-            message: `Unknown ${isCustom ? 'custom node' : 'op'} "${node.op || node.custom_node_id}" — skipped.`});
+            message: isSub ? `Published pipeline ${node.pipeline.published_id} v${node.pipeline.version} is not available (unpublished?) — skipped.`
+              : `Unknown ${isCustom ? 'custom node' : 'op'} "${node.op || node.custom_node_id}" — skipped.`});
           return;
         }
         const ports = isCustom ? spec.ports : {inputs: spec.inputs, outputs: spec.outputs};
         const pos = node.pos || {x: 260 + (i % 4) * 210, y: 60 + Math.floor(i / 4) * 170};
         this._addNode({
           our_id: node.id,
-          op: isCustom ? undefined : node.op,
+          op: isCustom || isSub ? undefined : node.op,
           custom_node_id: node.custom_node_id,
-          label: isCustom ? `custom:${spec.name}` : node.op,
+          pipeline: node.pipeline,
+          label: isSub ? spec.name : (isCustom ? `custom:${spec.name}` : node.op),
           params: node.params || {},
         }, ports.inputs.length, ports.outputs.length, pos.x, pos.y);
         dfIdByOurId[node.id] = this.editor.nodeId - 1;

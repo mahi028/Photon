@@ -13,10 +13,13 @@
       <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
       <span class="text-sm font-semibold text-gray-200">Pipelines</span>
     </div>
+    <div class="flex items-center gap-3 shrink-0">
+    <a href="/batches" class="text-sm text-gray-400 hover:text-indigo-400">Batches</a>
     <button @click="createBlank()" class="btn-primary text-sm px-4 py-2 flex items-center gap-2 shrink-0">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
       New Pipeline
     </button>
+    </div>
   </header>
 
   <main class="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">

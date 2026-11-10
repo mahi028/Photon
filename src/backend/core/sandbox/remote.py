@@ -164,7 +164,8 @@ class RemoteExecutor(Executor):
 
 def run_pipeline_remote(graph: dict, input_path: str, output_dir: str, node_preview_dir: str,
                         custom_nodes: dict | None = None, timeout: Optional[int] = None,
-                        input_mode: str = "RGB", assets: dict[str, str] | None = None) -> dict[str, Any]:
+                        input_mode: str = "RGB", assets: dict[str, str] | None = None,
+                        export_tables: bool = False) -> dict[str, Any]:
     """Same signature and result shape as executor.run_pipeline_subprocess."""
     timeout = timeout or config.EXECUTION_TIMEOUT_SECONDS * 4
     t0 = time.time()
@@ -175,6 +176,7 @@ def run_pipeline_remote(graph: dict, input_path: str, output_dir: str, node_prev
         keys = sorted(assets or {})
         data = _post("/v1/run-pipeline", {"graph": graph, "custom_nodes": custom_nodes or {},
                                           "timeout": timeout, "input_mode": input_mode,
+                                          "export_tables": bool(export_tables),
                                           "assets": {k: f"asset{i}" for i, k in enumerate(keys)}},
                      input_path, timeout,
                      extra_files={f"asset{i}": assets[k] for i, k in enumerate(keys)})
@@ -188,4 +190,6 @@ def run_pipeline_remote(graph: dict, input_path: str, output_dir: str, node_prev
                    for f in r.get("finals") or [] if _local(f.get("path"), out)]
     r["saved_models"] = [{**m, "path": _local(m.get("path"), out)}
                          for m in r.get("saved_models") or [] if _local(m.get("path"), out)]
+    r["tables"] = [{**t, "path": _local(t.get("path"), out)}
+                   for t in r.get("tables") or [] if _local(t.get("path"), out)]
     return r

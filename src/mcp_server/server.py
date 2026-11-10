@@ -53,7 +53,7 @@ from src.backend.config import config
 from src.backend.core.auth import api_keys
 from src.backend.core.image.fetch import FetchError, fetch_url
 from src.backend.core.image.ingest import IngestError, ingest_image_bytes
-from src.backend.core.pipeline import publishing, registry, runner
+from src.backend.core.pipeline import publishing, registry, runner, subgraph
 from src.backend.core.session import store
 from src.backend.core.session.manager import get_manager
 
@@ -88,6 +88,12 @@ INSTRUCTIONS = (
         "named 'lib:<module>.<function>': find them with list_ops(query=...), inspect with describe_op. "
         "scikit-learn models are nodes too: fit with ml_fit, keep with ml_save_model, reuse via "
         "ml_load_model (list_models); load_labels reads labels painted in the UI or sent with save_labels. "
+        "A published pipeline can be a node in your graph: {\"id\": \"s\", \"pipeline\": {\"published_id\": ..., "
+        "\"version\": N}, \"params\": {\"<inner node>.<param>\": value}}; input 'image', outputs = its last "
+        "nodes' ports (validate_pipeline lists them). "
+        "For many images: upload_images (a zip or a folder) -> run_batch -> poll get_batch -> "
+        "get_batch_results (CSV). describe_op('pipeline:<published_id>') shows a published "
+        "pipeline's ports for use as a node. "
         "Port names and types come from list_ops and must match exactly. IMAGE_RGB does "
         "not auto-convert to IMAGE_GRAY: insert to_grayscale. MASK/FLOAT_MAP auto-convert "
         "to grayscale. Always validate_pipeline before run_pipeline."
@@ -453,13 +459,32 @@ def list_ops(category: str | None = None, query: str | None = None) -> dict:
 
 @_tool(scope="read", annotations=_RO)
 def describe_op(name: str) -> dict:
-    """Full spec of one op: a catalog op ("otsu_threshold") or a library function
+    """Full spec of one op: a catalog op ("otsu_threshold"), a library function
     ("lib:skimage.segmentation.watershed", "lib:cv2.GaussianBlur"): input/output
-    ports (optional ones marked), params with kinds, defaults and docs."""
+    ports (optional ones marked), params with kinds, defaults and docs. Or a
+    published pipeline used as a node, "pipeline:<published_id>[@<version>]"
+    (default latest): its input, outputs, overridable "<inner node>.<param>"
+    params and the exact node JSON to put in a graph."""
+    if name.startswith("pipeline:"):
+        ref = name[len("pipeline:"):]
+        pid, _, ver = ref.partition("@")
+        d = publishing.get(_uid(), pid, int(ver) if ver.isdigit() else None)
+        if not d:
+            raise ToolError(f"Published pipeline {ref} not found.")
+        try:
+            itf = subgraph.interface(d, _uid())
+        except subgraph.SubgraphError as e:
+            raise ToolError(str(e))
+        out = {k: v for k, v in itf.items() if not k.startswith("_")}
+        out["node"] = {"id": "<your id>", "pipeline": {"published_id": d["published_id"],
+                                                       "version": d["version"]},
+                       "params": {"<inner node>.<param>": "<optional override>"}}
+        return out
     spec = registry.get_op(name)
     if not spec:
         raise ToolError(f"Unknown op: {name}. Library ops are 'lib:<module>.<function>'; "
-                        "search with list_ops(query=...).")
+                        "search with list_ops(query=...); published pipelines are "
+                        "'pipeline:<published_id>[@<version>]'.")
     return spec.to_dict()
 
 
@@ -467,7 +492,7 @@ def describe_op(name: str) -> dict:
 def validate_pipeline(graph: dict) -> dict:
     """Statically check a pipeline graph (unknown ops, port names/types, cycles,
     params, unconnected inputs). Returns {valid, issues[]}. Nothing runs."""
-    issues = runner.validate(graph, custom_nodes=_customs())
+    issues = subgraph.validate(graph, _customs(), _uid())
     return {"valid": not issues, "issues": [i.to_dict() for i in issues]}
 
 
@@ -701,7 +726,7 @@ def fork_pipeline(published_id: str, version: int | None = None,
 def save_pipeline(title: str, graph: dict, description: str = "") -> dict:
     """Save a (valid) graph as a new pipeline in the user's library — it then
     appears in the web UI's pipeline editor."""
-    issues = runner.validate(graph, custom_nodes=_customs())
+    issues = subgraph.validate(graph, _customs(), _uid())
     if issues:
         return {"saved": False, "issues": [i.to_dict() for i in issues]}
     pid = uuid.uuid4().hex
@@ -748,6 +773,119 @@ def save_labels(image_id: str, data_base64: str, name: str = "labels",
     return row
 
 
+@_tool(scope="run")
+def run_batch(image_ids: list[str] | None = None, session_ids: list[str] | None = None,
+              pipeline_id: str | None = None, published_id: str | None = None,
+              version: int | None = None, graph: dict | None = None, title: str | None = None) -> dict:
+    """Run one pipeline over many images in the background (up to 2000). Images: image_ids
+    (from upload_image) and/or every image of session_ids. Pipeline: exactly one of
+    pipeline_id, published_id (+version) or graph. Returns the batch; poll get_batch.
+    Each image's numbers and tables are collected into a results table."""
+    from src.backend.core.pipeline import batch
+    uid = _uid()
+    try:
+        images = batch.images_for(uid, image_ids, session_ids)
+        return batch.create(uid, images, title=title, pipeline_id=pipeline_id,
+                            published_id=published_id, version=version, graph=graph)
+    except batch.BatchError as e:
+        raise ToolError(str(e) + (f" Issues: {e.issues}" if e.issues else ""))
+
+
+@_tool(scope="read", annotations=_RO)
+def get_batch(batch_id: str, include_items: bool = False, max_items: int = 50) -> dict:
+    """Progress of a batch (done / failed / pending counts). include_items adds per-image
+    status, error and values (first max_items). Full results: the web page /batches/<id>
+    has CSV and zip downloads."""
+    from src.backend.core.pipeline import batch
+    try:
+        b = batch.get(_uid(), batch_id, with_items=include_items)
+    except batch.BatchError as e:
+        raise ToolError(str(e))
+    if include_items:
+        b["items"] = [{k: it[k] for k in ("idx", "filename", "image_id", "status", "error", "seconds", "values")}
+                      for it in b["items"][:max(1, min(max_items, 500))]]
+    return b
+
+
+@_tool(scope="run")
+def upload_images(zip_base64: str | None = None, zip_url: str | None = None,
+                  paths: list[str] | None = None, session_id: str | None = None) -> dict:
+    """Upload many images at once, for run_batch. Give one source:
+      * zip_base64: a .zip of images, base64-encoded (folders inside are fine);
+      * zip_url: a public http(s) URL of a .zip;
+      * paths: files or directories on the Photon server's disk (stdio; over HTTP
+        only inside allow-listed directories). Directories are read one level deep.
+    Returns {images: [{image_id, filename}], skipped: [{filename, reason}]}. With
+    session_id the images are also attached to that session."""
+    from src.backend.core.pipeline import batch
+    if sum(map(bool, (zip_base64, zip_url, paths))) != 1:
+        raise ToolError("Provide exactly one of zip_base64, zip_url or paths.")
+    files: list[tuple[str, bytes]] = []
+    if zip_base64:
+        b64 = zip_base64.strip()
+        if b64.startswith("data:") and "," in b64:
+            b64 = b64.split(",", 1)[1]
+        if len(b64) * 3 // 4 > config.MAX_UPLOAD_BYTES:
+            raise ToolError(f"Archive too large (max {config.MAX_UPLOAD_MB} MB); split it or use zip_url.")
+        try:
+            files.append(("upload.zip", base64.b64decode(b64, validate=True)))
+        except (binascii.Error, ValueError):
+            raise ToolError("zip_base64 is not valid base64.")
+    elif zip_url:
+        try:
+            data, name = fetch_url(zip_url)
+        except FetchError as e:
+            raise ToolError(str(e))
+        files.append((name if name.lower().endswith(".zip") else "download.zip", data))
+    else:
+        for raw in paths[:batch.ZIP_MAX_ENTRIES]:
+            p = Path(raw).expanduser()
+            if p.is_dir():
+                for child in sorted(p.iterdir()):
+                    if child.is_file() and not child.name.startswith("."):
+                        files.append(_read_local(str(child))[::-1])
+            else:
+                files.append(_read_local(raw)[::-1])
+            if len(files) > batch.ZIP_MAX_ENTRIES:
+                raise ToolError(f"More than {batch.ZIP_MAX_ENTRIES} files.")
+    if session_id:
+        _session(session_id)
+    images, skipped = batch.ingest_files(_uid(), files)
+    if session_id:
+        for im in images:
+            get_manager().add_image(session_id, im["image_id"])
+    return {"images": images, "skipped": skipped, "count": len(images)}
+
+
+@_tool(scope="read", annotations=_RO)
+def get_batch_results(batch_id: str, table: str | None = None, offset: int = 0,
+                      limit: int = 1000) -> dict:
+    """A batch's results as CSV text, paged. Without `table`: one row per image
+    (index, filename, status, seconds, error, then a column per node.port value).
+    With table="<node>.<port>" (names from get_batch's `tables`): that table from
+    every image, e.g. regionprops objects, each row tagged with its image. Page
+    with offset / next_offset."""
+    from src.backend.core.pipeline import batch
+    try:
+        if table:
+            return batch.table_page(_uid(), batch_id, table, offset, limit)
+        out = batch.values_page(_uid(), batch_id, offset, limit)
+        out["tables"] = batch.get(_uid(), batch_id)["tables"]
+        return out
+    except batch.BatchError as e:
+        raise ToolError(str(e))
+
+
+@_tool(scope="run")
+def cancel_batch(batch_id: str) -> dict:
+    """Stop a batch after the images already running."""
+    from src.backend.core.pipeline import batch
+    try:
+        return batch.cancel(_uid(), batch_id)
+    except batch.BatchError as e:
+        raise ToolError(str(e))
+
+
 class ApiKeyVerifier:
     """Bearer-token verifier backed by Photon API keys (core/auth/api_keys.py)."""
 
@@ -783,6 +921,11 @@ def build_server(*, http_auth_url: str | None = None) -> MCPServer:
     return server
 
 
+def _recover_batches() -> None:
+    from src.backend.core.pipeline import batch
+    threading.Thread(target=batch.recover, name="batch-recover", daemon=True).start()
+
+
 def main() -> None:
     import argparse
 
@@ -801,6 +944,7 @@ def main() -> None:
         if not os.getenv("PHOTON_MCP_USER"):
             print("photon-mcp: PHOTON_MCP_USER not set; tools will error until it is.",
                   file=sys.stderr)
+        _recover_batches()
         build_server().run("stdio")
         return
 
@@ -810,6 +954,7 @@ def main() -> None:
                   or f"http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{args.port}/mcp")
     print(f"photon-mcp: streamable HTTP on {args.host}:{args.port}/mcp "
           f"(public URL {public_url}); API key required", file=sys.stderr)
+    _recover_batches()
     build_server(http_auth_url=public_url).run("streamable-http", host=args.host, port=args.port)
 
 

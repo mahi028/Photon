@@ -19,7 +19,7 @@ from flask import Blueprint, jsonify, request
 from ..config import config
 from ..core.auth.middleware import get_current_user_id, login_required
 from ..core.image.thumbnail import generate_thumbnail
-from ..core.pipeline import publishing, registry, runner, saved
+from ..core.pipeline import publishing, registry, runner, saved, subgraph
 from ..core.sandbox import backend as sandbox_backend
 from ..core.sandbox.subprocess_executor import ASTSecurityError, _check_ast_safety
 from ..core.session import store
@@ -158,7 +158,7 @@ def validate_pipeline():
     graph = data.get("graph") or {}
     customs = {cn["custom_node_id"]: cn
                for cn in store.list_custom_nodes(get_current_user_id())}
-    issues = runner.validate(graph, custom_nodes=customs)
+    issues = subgraph.validate(graph, customs, get_current_user_id())
     return jsonify({"valid": not issues, "issues": [i.to_dict() for i in issues]}), 200
 
 
@@ -207,6 +207,22 @@ def get_published(published_id: str):
     if not d:
         return jsonify({"error": "Published pipeline not found"}), 404
     return jsonify(d), 200
+
+
+@pipeline_bp.route("/published/<published_id>/node", methods=["GET"])
+@login_required
+def published_as_node(published_id: str):
+    """Ports and overridable params of a published version used as a node
+    (D-045). ?version= pins it; default the latest."""
+    user_id = get_current_user_id()
+    d = publishing.get(user_id, published_id, _int_or_none(request.args.get("version")))
+    if not d:
+        return jsonify({"error": "Published pipeline not found"}), 404
+    try:
+        itf = subgraph.interface(d, user_id)
+    except subgraph.SubgraphError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({k: v for k, v in itf.items() if not k.startswith("_")}), 200
 
 
 @pipeline_bp.route("/published/<published_id>/thumbnail", methods=["GET"])
@@ -338,7 +354,13 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
 
     customs = custom_nodes if custom_nodes is not None else {
         cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
-    issues = runner.validate(graph, custom_nodes=customs)
+    # Published pipelines used as nodes run as their (pinned) inner graphs (D-045).
+    try:
+        run_graph, customs, outer = subgraph.expand(graph, user_id, customs)
+    except subgraph.SubgraphError as e:
+        return {"error": "Pipeline is invalid", "issues": [{"node_id": e.node_id, "message": str(e),
+                                                             "severity": "error"}]}
+    issues = subgraph.map_issues(runner.validate(run_graph, custom_nodes=customs), graph)
     if issues:
         return {"error": "Pipeline is invalid", "issues": [i.to_dict() for i in issues]}
     provenance_json = json.dumps({**provenance, "graph": graph} if provenance else graph, indent=2)
@@ -364,14 +386,14 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                   "node_count": len(graph.get("nodes") or [])})
 
             try:
-                assets = saved.stage(graph, user_id, image_id, (meta.shape[1], meta.shape[0]))
+                assets = saved.stage(run_graph, user_id, image_id, (meta.shape[1], meta.shape[0]))
             except saved.AssetError as e:
                 last_error = str(e)
                 push({"event": "pipeline_error", "image_slot": slot_idx,
                       "failed_node": None, "message": last_error})
                 continue
             result = sandbox_backend.run_pipeline(
-                graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
+                run_graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
                 input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets,
             )
             for m in saved.register_saved(user_id, result.get("saved_models") or [],
@@ -379,6 +401,8 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                 models_saved.append({**m, "image_slot": slot_idx})
                 push({"event": "model_saved", "image_slot": slot_idx, "model": m})
 
+            if outer:
+                subgraph.collapse(result, outer)
             for ev in result.get("events", []):
                 push({"event": f"node_{ev['phase']}", "node_id": ev["node_id"],
                       "image_slot": slot_idx, "message": ev.get("message")})
@@ -414,7 +438,7 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                     preview_path = None
 
                 image_out_id = uuid.uuid4().hex
-                description = f"pipeline_{title}_slot{slot_idx}_{final['node_id']}"
+                description = f"pipeline_{title}_slot{slot_idx}_{final['node_id'].replace('/', '~')}"
                 manager.add_output(session_id, GeneratedImage(
                     image_id=image_out_id,
                     session_id=session_id,
@@ -479,7 +503,7 @@ def run_pipeline_route(session_id: str):
 
     if customs is None:
         customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
-    issues = runner.validate(graph, custom_nodes=customs)
+    issues = subgraph.validate(graph, customs, user_id)
     if issues:
         return jsonify({"error": "Pipeline is invalid",
                         "issues": [i.to_dict() for i in issues]}), 400

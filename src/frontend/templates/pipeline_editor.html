@@ -63,6 +63,9 @@
           <span class="animate-spin w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span> Running
         </span>
       </button>
+      <a :href="publishedId ? `/batches?published_id=${publishedId}&version=${publishedVersion || ''}` : `/batches?pipeline_id=${pipelineId}`"
+         @click="if (dirty && !publishedId) { $event.preventDefault(); _toast('Save the pipeline first: a batch runs the saved version.'); }"
+         class="btn-secondary text-sm px-3 py-1.5" title="Run this pipeline over many images">Batch…</a>
       <template x-if="!isPreset">
         <button @click="save()" :disabled="saving" class="btn-secondary text-sm px-3 py-1.5 disabled:opacity-50"
                 x-text="saving ? 'Saving…' : 'Save'"></button>
@@ -163,8 +166,14 @@
             <div>
               <p class="text-xs font-mono text-gray-200 break-all" x-text="selectedSpec.name"></p>
               <p class="text-[10px] text-gray-500 mt-0.5" x-text="selectedSpec.doc"></p>
-              <template x-if="selectedSpec.library">
+              <template x-if="selectedSpec.library && !selectedSpec.subpipeline">
                 <p class="text-[10px] text-gray-600 mt-1">Library function: empty params use the library's defaults. Inputs marked ? are optional.</p>
+              </template>
+              <template x-if="selectedSpec.subpipeline">
+                <div class="text-[10px] text-gray-600 mt-1 space-y-1">
+                  <p>Published pipeline, pinned to v<span x-text="selectedSpec.version"></span> by <span x-text="selectedSpec.owner"></span>. Params named <code class="font-mono">node.param</code> override the published values; empty keeps them.</p>
+                  <a class="text-indigo-400 hover:text-indigo-300" :href="`/published/${selectedSpec.published_id}?version=${selectedSpec.version}`" target="_blank">Open it</a>
+                </div>
               </template>
             </div>
             <template x-if="!(selectedSpec.params || []).length">

@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+
+{% block title %}Batches — Photon{% endblock %}
+
+{% block content %}
+<div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden" x-data="batchesPage()">
+
+  <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/" class="text-gray-400 hover:text-white p-1 rounded transition-colors" title="Back to sessions">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      </a>
+      <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
+      <span class="text-sm font-semibold text-gray-200">Batches</span>
+    </div>
+    <a href="/pipelines" class="text-xs text-gray-400 hover:text-indigo-400">Pipelines</a>
+  </header>
+
+  <main class="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
+    <div class="max-w-4xl mx-auto flex flex-col gap-6">
+
+      <p class="text-sm text-gray-400">
+        Run one pipeline over many images in the background. Every image gets a row of results
+        (numbers, thresholds, object tables) you can download as CSV, plus its output images.
+      </p>
+
+      <!-- New batch -->
+      <section class="panel flex flex-col gap-4">
+        <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">New batch</h2>
+
+        <label class="flex flex-col gap-1">
+          <span class="text-xs text-gray-400">Pipeline</span>
+          <select x-model="source"
+                  class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-indigo-500">
+            <option value="">Choose a pipeline…</option>
+            <optgroup label="Your pipelines">
+              <template x-for="p in mine" :key="p.pipeline_id">
+                <option :value="'p:' + p.pipeline_id" x-text="p.title"></option>
+              </template>
+            </optgroup>
+            <optgroup label="Published">
+              <template x-for="p in published" :key="p.published_id">
+                <option :value="'pub:' + p.published_id" x-text="`${p.title} · ${p.owner} · v${p.latest_version}`"></option>
+              </template>
+            </optgroup>
+            <optgroup label="Presets">
+              <template x-for="p in presets" :key="p.pipeline_id">
+                <option :value="'p:' + p.pipeline_id" x-text="p.title"></option>
+              </template>
+            </optgroup>
+          </select>
+        </label>
+
+        <div class="flex flex-col gap-2">
+          <div class="flex bg-gray-800 rounded-lg p-0.5 text-xs font-medium self-start">
+            <button @click="mode = 'upload'" :class="mode === 'upload' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'" class="px-2.5 py-1 rounded-md">Upload images</button>
+            <button @click="mode = 'sessions'" :class="mode === 'sessions' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'" class="px-2.5 py-1 rounded-md">From sessions</button>
+          </div>
+
+          <template x-if="mode === 'upload'">
+            <div class="flex flex-col gap-2">
+              <label class="border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors"
+                     :class="dragging ? 'border-indigo-500 bg-indigo-950/30' : 'border-gray-700 hover:border-gray-500'"
+                     @dragover.prevent="dragging = true" @dragleave="dragging = false"
+                     @drop.prevent="dragging = false; addFiles($event.dataTransfer.files)">
+                <input type="file" multiple class="hidden" accept=".png,.jpg,.jpeg,.tif,.tiff,.npy,.bmp,.webp,.zip"
+                       @change="addFiles($event.target.files); $event.target.value = ''" />
+                <p class="text-sm text-gray-300">Drop images or .zip archives here, or click to choose</p>
+                <p class="text-[11px] text-gray-600 mt-1">PNG, JPG, TIFF, BMP, WebP, .npy · up to 2000 images</p>
+              </label>
+              <p x-show="files.length" class="text-xs text-gray-400">
+                <span x-text="files.length"></span> file(s), <span x-text="fmtBytes(files.reduce((a, f) => a + f.size, 0))"></span>
+                <button @click="files = []" class="ml-2 text-gray-500 hover:text-red-400">clear</button>
+              </p>
+            </div>
+          </template>
+
+          <template x-if="mode === 'sessions'">
+            <div class="max-h-56 overflow-y-auto custom-scrollbar border border-gray-800 rounded-lg divide-y divide-gray-800">
+              <template x-if="!sessions.length"><p class="text-xs text-gray-600 p-3">No sessions.</p></template>
+              <template x-for="s in sessions" :key="s.session_id">
+                <label class="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-800/60 cursor-pointer">
+                  <input type="checkbox" :value="s.session_id" x-model="pickedSessions" class="accent-indigo-500" />
+                  <span class="truncate flex-1" x-text="s.title"></span>
+                  <span class="text-[11px] text-gray-500" x-text="`${(s.image_ids || []).length || s.image_count || ''} img`"></span>
+                </label>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <label class="flex flex-col gap-1">
+          <span class="text-xs text-gray-400">Name (optional)</span>
+          <input x-model="title" type="text" maxlength="200" placeholder="e.g. plate 3 nuclei"
+                 class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500" />
+        </label>
+
+        <div class="flex items-center gap-3">
+          <button @click="start()" :disabled="busy || !source || (mode === 'upload' ? !files.length : !pickedSessions.length)"
+                  class="btn-primary text-sm disabled:opacity-50" x-text="busy ? status : 'Start batch'"></button>
+          <div x-show="busy && uploadTotal" class="flex-1 h-1.5 bg-gray-800 rounded overflow-hidden">
+            <div class="h-full bg-indigo-500 transition-all" :style="`width: ${100 * uploadDone / Math.max(1, uploadTotal)}%`"></div>
+          </div>
+        </div>
+        <p x-show="skipped.length" class="text-xs text-amber-400" x-text="`Skipped ${skipped.length}: ` + skipped.slice(0, 5).map(s => `${s.filename} (${s.reason})`).join(', ')"></p>
+        <p x-show="error" x-text="error" class="text-xs text-red-400"></p>
+      </section>
+
+      <!-- List -->
+      <section class="flex flex-col gap-2">
+        <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Your batches</h2>
+        <template x-if="!batches.length"><p class="text-sm text-gray-600">No batches yet.</p></template>
+        <template x-for="b in batches" :key="b.batch_id">
+          <a :href="`/batches/${b.batch_id}`" class="panel flex items-center gap-4 py-3 hover:border-gray-600 transition-colors">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-medium text-gray-100 truncate" x-text="b.title"></span>
+                <span class="text-xs px-1.5 py-0.5 rounded" :class="statusClass(b.status)" x-text="b.status"></span>
+              </div>
+              <div class="text-[11px] text-gray-500 flex gap-3">
+                <span x-text="new Date(b.created_at + 'Z').toLocaleString()"></span>
+                <span x-text="`${b.done || 0}/${b.total} done`"></span>
+                <span x-show="b.failed" class="text-red-400" x-text="`${b.failed} failed`"></span>
+              </div>
+            </div>
+            <div class="w-32 h-1.5 bg-gray-800 rounded overflow-hidden shrink-0">
+              <div class="h-full bg-indigo-500" :style="`width: ${100 * ((b.done || 0) + (b.failed || 0)) / Math.max(1, b.total)}%`"></div>
+            </div>
+          </a>
+        </template>
+      </section>
+    </div>
+  </main>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function batchesPage() {
+  const params = new URLSearchParams(location.search);
+  return {
+    all: [], published: [], sessions: [], batches: [],
+    source: params.get('pipeline_id') ? 'p:' + params.get('pipeline_id')
+          : (params.get('published_id') ? 'pub:' + params.get('published_id') : ''),
+    version: params.get('version') ? Number(params.get('version')) : null,
+    mode: 'upload', files: [], pickedSessions: [], title: '', dragging: false,
+    busy: false, status: '', uploadDone: 0, uploadTotal: 0, skipped: [], error: '',
+
+    get mine() { return this.all.filter(p => !p.is_preset); },
+    get presets() { return this.all.filter(p => p.is_preset); },
+
+    async init() {
+      const [p, pub, s, b] = await Promise.all([fetch('/api/pipelines'), fetch('/api/published'),
+                                                fetch('/api/sessions'), fetch('/api/batches')]);
+      if (p.ok) this.all = await p.json();
+      if (pub.ok) this.published = (await pub.json()).filter(x => !x.unpublished_at);
+      if (s.ok) this.sessions = await s.json();
+      if (b.ok) this.batches = (await b.json()).batches;
+      if (this.batches.some(x => ['queued', 'running'].includes(x.status))) setTimeout(() => this.refresh(), 3000);
+    },
+
+    async refresh() {
+      const b = await fetch('/api/batches');
+      if (b.ok) this.batches = (await b.json()).batches;
+      if (this.batches.some(x => ['queued', 'running'].includes(x.status))) setTimeout(() => this.refresh(), 3000);
+    },
+
+    addFiles(list) { this.files = [...this.files, ...Array.from(list || [])]; },
+
+    fmtBytes(n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.ceil(n / 1e3) + ' kB'; },
+
+    statusClass(s) {
+      return {done: 'bg-green-900 text-green-300', running: 'bg-indigo-900 text-indigo-300',
+              queued: 'bg-gray-800 text-gray-300', failed: 'bg-red-900 text-red-300',
+              cancelled: 'bg-gray-800 text-gray-400'}[s] || 'bg-gray-800 text-gray-400';
+    },
+
+    // Upload in chunks: the server caps one request at MAX_UPLOAD_MB.
+    async upload() {
+      const chunks = [];
+      let cur = [], size = 0;
+      for (const f of this.files) {
+        if (cur.length && (cur.length >= 16 || size + f.size > 120e6)) { chunks.push(cur); cur = []; size = 0; }
+        cur.push(f); size += f.size;
+      }
+      if (cur.length) chunks.push(cur);
+      this.uploadTotal = this.files.length;
+      this.uploadDone = 0;
+      const images = [];
+      for (const chunk of chunks) {
+        const fd = new FormData();
+        chunk.forEach(f => fd.append('files', f, f.name));
+        const res = await fetch('/api/batches/upload', {method: 'POST', body: fd});
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+        images.push(...data.images);
+        this.skipped.push(...data.skipped);
+        this.uploadDone += chunk.length;
+        this.status = `Uploading ${this.uploadDone}/${this.uploadTotal}…`;
+      }
+      return images.map(i => i.image_id);
+    },
+
+    async start() {
+      this.busy = true; this.error = ''; this.skipped = [];
+      try {
+        const body = {title: this.title.trim() || null};
+        if (this.source.startsWith('pub:')) {
+          body.published_id = this.source.slice(4);
+          if (this.version && params.get('published_id') === body.published_id) body.version = this.version;
+        } else body.pipeline_id = this.source.slice(2);
+        if (this.mode === 'upload') {
+          this.status = 'Uploading…';
+          body.image_ids = await this.upload();
+          if (!body.image_ids.length) throw new Error('None of the files could be read as images.');
+        } else body.session_ids = this.pickedSessions;
+        this.status = 'Starting…';
+        const res = await fetch('/api/batches', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                 body: JSON.stringify(body)});
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error((data.error || 'Could not start') +
+            (data.issues ? ': ' + data.issues.slice(0, 3).map(i => i.message).join('; ') : ''));
+        }
+        location.href = `/batches/${data.batch_id}`;
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.busy = false;
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

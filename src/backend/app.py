@@ -37,6 +37,18 @@ def create_app() -> Flask:
     from .core.pipeline import library as _library
     threading.Thread(target=_library.all_specs, name="library-warmup", daemon=True).start()
 
+    # Batch runs whose process died (a restart, a crash) are taken over by the
+    # first process that serves a request: not at import, because a dev
+    # reloader's watcher process imports the app too but never serves (D-046).
+    _recovered = {"done": False}
+
+    @app.before_request
+    def _recover_batches_once():
+        if not _recovered["done"]:
+            _recovered["done"] = True
+            from .core.pipeline import batch as _batch
+            threading.Thread(target=_batch.recover, name="batch-recover", daemon=True).start()
+
     # Register blueprints
     from .api.auth_routes import auth_bp
     from .api.upload_routes import upload_bp
@@ -50,6 +62,7 @@ def create_app() -> Flask:
     from .api.llm_routes import llm_bp
     from .api.api_key_routes import api_key_bp
     from .api.saved_routes import saved_bp
+    from .api.batch_routes import batch_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(llm_bp, url_prefix="/api")
@@ -62,6 +75,7 @@ def create_app() -> Flask:
     app.register_blueprint(example_bp, url_prefix="/api")
     app.register_blueprint(api_key_bp, url_prefix="/api")
     app.register_blueprint(saved_bp, url_prefix="/api")
+    app.register_blueprint(batch_bp, url_prefix="/api")
     app.register_blueprint(shared_bp)
 
     # Serve preview images from volumes/uploads
@@ -116,6 +130,18 @@ def create_app() -> Flask:
     def api_keys_view():
         from flask import render_template
         return render_template("api_keys.html", mcp_public_url=config.MCP_PUBLIC_URL)
+
+    @app.route("/batches")
+    @login_required
+    def batches_view():
+        from flask import render_template
+        return render_template("batches.html")
+
+    @app.route("/batches/<batch_id>")
+    @login_required
+    def batch_view(batch_id: str):
+        from flask import render_template
+        return render_template("batch.html", batch_id=batch_id)
 
     # --- v3 pipeline editor ---
     @app.route("/pipelines")

@@ -164,11 +164,13 @@ def run_pipeline(job: _Job):
     from src.backend.core.pipeline.executor import run_pipeline_subprocess
     r = run_pipeline_subprocess(job.job.get("graph") or {}, str(job.input), str(job.out), str(job.nodes),
                                 custom_nodes=job.job.get("custom_nodes") or {}, timeout=job.timeout,
-                                input_mode=job.job.get("input_mode") or "RGB", assets=job.assets)
+                                input_mode=job.job.get("input_mode") or "RGB", assets=job.assets,
+                                export_tables=bool(job.job.get("export_tables")))
     r["previews"] = {nid: {**p, "path": _rel(p.get("path"), job.nodes)}
                      for nid, p in (r.get("previews") or {}).items()}
     r["finals"] = [{**f, "path": _rel(f.get("path"), job.out)} for f in r.get("finals") or []]
     r["saved_models"] = [{**m, "path": _rel(m.get("path"), job.out)} for m in r.get("saved_models") or []]
+    r["tables"] = [{**t, "path": _rel(t.get("path"), job.out)} for t in r.get("tables") or []]
     return _zip_result(r, {"out": job.out, "nodes": job.nodes})
 
 

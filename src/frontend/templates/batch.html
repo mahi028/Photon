@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+
+{% block title %}Batch — Photon{% endblock %}
+
+{% block content %}
+<div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden" x-data="batchPage({{ batch_id|tojson }})">
+
+  <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/batches" class="text-gray-400 hover:text-white p-1 rounded transition-colors" title="All batches">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      </a>
+      <span class="text-sm font-semibold text-gray-200 truncate" x-text="b ? b.title : 'Batch'"></span>
+      <span x-show="b" class="text-xs px-1.5 py-0.5 rounded shrink-0" :class="b && statusClass(b.status)" x-text="b && b.status"></span>
+    </div>
+    <div class="flex items-center gap-2 shrink-0" x-show="b">
+      <button x-show="b && active" @click="cancel()" :disabled="b && b.cancel_requested" class="btn-secondary text-xs disabled:opacity-50"
+              x-text="b && b.cancel_requested ? 'Cancelling…' : 'Cancel'"></button>
+      <button x-show="b && !active && (b.failed || b.cancelled)" @click="retry()" class="btn-secondary text-xs">Retry failed</button>
+      <button x-show="b && !active" @click="remove()" class="text-xs text-gray-500 hover:text-red-400 px-2">Delete</button>
+    </div>
+  </header>
+
+  <main class="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
+    <template x-if="error"><p class="text-sm text-red-400" x-text="error"></p></template>
+    <template x-if="b">
+      <div class="max-w-6xl mx-auto flex flex-col gap-5">
+
+        <section class="panel flex flex-col gap-3">
+          <div class="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+            <span class="text-gray-200"><span class="tabular-nums" x-text="b.done"></span> / <span x-text="b.total"></span> done</span>
+            <span x-show="b.failed" class="text-red-400"><span x-text="b.failed"></span> failed</span>
+            <span x-show="b.running" class="text-indigo-300"><span x-text="b.running"></span> running</span>
+            <span x-show="b.cancelled" class="text-gray-400"><span x-text="b.cancelled"></span> cancelled</span>
+            <span class="text-xs text-gray-500" x-show="eta" x-text="eta"></span>
+            <span class="text-xs text-gray-500 ml-auto" x-text="sourceLabel"></span>
+          </div>
+          <div class="h-2 bg-gray-800 rounded overflow-hidden flex">
+            <div class="h-full bg-indigo-500 transition-all" :style="`width: ${100 * b.done / Math.max(1, b.total)}%`"></div>
+            <div class="h-full bg-red-500 transition-all" :style="`width: ${100 * b.failed / Math.max(1, b.total)}%`"></div>
+          </div>
+          <div class="flex flex-wrap gap-2 pt-1">
+            <a :href="`/api/batches/${id}/values.csv`" class="btn-secondary text-xs">Values CSV</a>
+            <template x-for="t in (b.tables || [])" :key="t.key">
+              <a :href="`/api/batches/${id}/table.csv?key=${encodeURIComponent(t.key)}`" class="btn-secondary text-xs"
+                 :title="`${t.rows} rows from ${t.images} images`" x-text="`${t.key} CSV`"></a>
+            </template>
+            <a :href="`/api/batches/${id}/download.zip`" class="btn-primary text-xs">Download all (zip)</a>
+          </div>
+        </section>
+
+        <section class="flex flex-col gap-2">
+          <div class="flex items-center gap-3">
+            <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Images</h2>
+            <select x-model="filter" class="bg-gray-950 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-200">
+              <option value="">all</option><option value="done">done</option><option value="failed">failed</option>
+              <option value="pending">pending</option><option value="running">running</option>
+            </select>
+          </div>
+          <div class="overflow-x-auto custom-scrollbar border border-gray-800 rounded-xl">
+            <table class="min-w-full text-xs">
+              <thead class="bg-gray-900 text-gray-400">
+                <tr>
+                  <th class="px-2 py-2 text-left font-medium">#</th>
+                  <th class="px-2 py-2 text-left font-medium">Output</th>
+                  <th class="px-2 py-2 text-left font-medium">Image</th>
+                  <th class="px-2 py-2 text-left font-medium">Status</th>
+                  <th class="px-2 py-2 text-right font-medium">s</th>
+                  <template x-for="c in (b.columns || [])" :key="c">
+                    <th class="px-2 py-2 text-right font-mono font-medium whitespace-nowrap" x-text="c"></th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-800">
+                <template x-for="it in shown" :key="it.idx">
+                  <tr class="hover:bg-gray-900/60 align-top">
+                    <td class="px-2 py-1.5 text-gray-500 tabular-nums" x-text="it.idx + 1"></td>
+                    <td class="px-2 py-1.5">
+                      <template x-if="it.outputs && it.outputs.length && it.outputs[0].preview">
+                        <a :href="`/api/batches/${id}/files/${it.outputs[0].path}`" target="_blank">
+                          <img :src="`/api/batches/${id}/files/${it.outputs[0].preview}`" class="w-14 h-10 object-cover rounded border border-gray-700" loading="lazy" />
+                        </a>
+                      </template>
+                    </td>
+                    <td class="px-2 py-1.5 text-gray-200 max-w-[180px] truncate" :title="it.filename" x-text="it.filename"></td>
+                    <td class="px-2 py-1.5">
+                      <span :class="statusText(it.status)" x-text="it.status"></span>
+                      <p x-show="it.error" class="text-[10px] text-red-400 max-w-[260px] truncate" :title="it.error" x-text="it.error"></p>
+                    </td>
+                    <td class="px-2 py-1.5 text-right text-gray-500 tabular-nums" x-text="it.seconds != null ? it.seconds.toFixed(1) : ''"></td>
+                    <template x-for="c in (b.columns || [])" :key="c">
+                      <td class="px-2 py-1.5 text-right font-mono text-gray-200 whitespace-nowrap max-w-[200px] truncate" :title="cellTitle(it, c)" x-text="cell(it, c)"></td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <p x-show="filtered.length > shown.length" class="text-xs text-gray-500">
+            Showing <span x-text="shown.length"></span> of <span x-text="filtered.length"></span>.
+            <button @click="limit += 200" class="text-indigo-400 hover:text-indigo-300">Show more</button>
+          </p>
+        </section>
+      </div>
+    </template>
+  </main>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function batchPage(id) {
+  return {
+    id, b: null, error: '', filter: '', limit: 200, timer: null,
+
+    get active() { return this.b && ['queued', 'running'].includes(this.b.status); },
+    get filtered() { return (this.b.items || []).filter(it => !this.filter || it.status === this.filter); },
+    get shown() { return this.filtered.slice(0, this.limit); },
+    get sourceLabel() {
+      const s = this.b.source || {};
+      if (s.published_id) return `published pipeline v${s.version}`;
+      if (s.pipeline_id) return 'your pipeline';
+      return 'ad-hoc graph';
+    },
+    get eta() {
+      if (!this.active || !this.b.items) return '';
+      const secs = this.b.items.filter(i => i.seconds != null).map(i => i.seconds);
+      const left = this.b.pending + this.b.running;
+      if (!secs.length || !left) return '';
+      const avg = secs.reduce((a, x) => a + x, 0) / secs.length;
+      const workers = Math.max(1, this.b.running);
+      const m = Math.round(avg * left / workers / 60);
+      return m >= 1 ? `~${m} min left` : '< 1 min left';
+    },
+
+    async init() { await this.load(); },
+
+    async load() {
+      const res = await fetch(`/api/batches/${this.id}`);
+      if (!res.ok) { this.error = (await res.json().catch(() => ({}))).error || 'Batch not found'; return; }
+      this.b = await res.json();
+      clearTimeout(this.timer);
+      if (this.active) this.timer = setTimeout(() => this.load(), this.b.total > 500 ? 5000 : 2000);
+    },
+
+    cell(it, c) {
+      const i = c.lastIndexOf('.');
+      const v = ((it.values || {})[c.slice(0, i)] || {})[c.slice(i + 1)];
+      if (v === undefined || v === null) return '';
+      if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toPrecision(5);
+      if (typeof v === 'string') return v;
+      return JSON.stringify(v);
+    },
+    cellTitle(it, c) { return this.cell(it, c); },
+
+    statusClass(s) {
+      return {done: 'bg-green-900 text-green-300', running: 'bg-indigo-900 text-indigo-300',
+              queued: 'bg-gray-800 text-gray-300', cancelled: 'bg-gray-800 text-gray-400'}[s] || 'bg-gray-800 text-gray-400';
+    },
+    statusText(s) {
+      return {done: 'text-green-400', failed: 'text-red-400', running: 'text-indigo-300'}[s] || 'text-gray-500';
+    },
+
+    async post(path) {
+      const res = await fetch(`/api/batches/${this.id}/${path}`, {method: 'POST'});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) window.ui.toast(data.error || 'Failed', 'error');
+      await this.load();
+    },
+    cancel() { return this.post('cancel'); },
+    retry() { return this.post('retry'); },
+
+    async remove() {
+      if (!(await window.ui.confirm({title: 'Delete batch?', message: 'Its results and output images are deleted. The uploaded source images stay.', confirmText: 'Delete', danger: true}))) return;
+      const res = await fetch(`/api/batches/${this.id}`, {method: 'DELETE'});
+      if (res.ok) location.href = '/batches';
+      else window.ui.toast('Delete failed', 'error');
+    },
+  };
+}
+</script>
+{% endblock %}

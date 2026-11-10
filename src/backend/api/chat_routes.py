@@ -302,7 +302,8 @@ def _llm_loop_body(session_id: str, user_prompt: str, claimed: list) -> None:
 
             customs = run_customs if run_customs is not None else {
                 cn["custom_node_id"]: cn for cn in store.list_custom_nodes(sess.user_id)}
-            issues = pipeline_runner.validate(graph, custom_nodes=customs)
+            from ..core.pipeline import subgraph as _subgraph
+            issues = _subgraph.validate(graph, customs, sess.user_id)
             if issues:
                 issue_dicts = [i.to_dict() for i in issues]
                 assistant_msg.pipeline = {**graph, "published": shared} if shared else graph

@@ -85,7 +85,8 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "",
         raise PublishError("Pipeline is empty.")
 
     own_customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
-    issues = runner.validate(graph, custom_nodes=own_customs)
+    from . import subgraph
+    issues = subgraph.validate(graph, own_customs, user_id)
     if issues:
         raise PublishError("Pipeline is invalid; fix it before publishing.", 400,
                            [i.to_dict() for i in issues])

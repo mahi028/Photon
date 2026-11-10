@@ -212,3 +212,47 @@ def test_library_ops_over_mcp(mcp_url, make_user):
     assert cat["library_ops"][0]["name"] == "lib:skimage.filters.threshold_multiotsu"
     assert [o["name"] for o in spec["outputs"]] == ["retval", "dst"]
     assert denied and v["valid"], v
+
+
+@pytest.mark.slow
+def test_batch_and_pipeline_nodes_over_mcp(mcp_url, make_user, disk_png):
+    """upload_images (zip) -> run_batch with a published pipeline as a node ->
+    get_batch -> get_batch_results; describe_op('pipeline:...') (D-045/046)."""
+    import base64
+    import io
+    import zipfile
+    c, _, _ = make_user()
+    key = c.post("/api/keys", json={"name": "batch", "scope": "run"}).get_json()["key"]
+    inner = {"nodes": [{"id": "g", "op": "to_grayscale"}, {"id": "o", "op": "otsu_threshold"}],
+             "edges": [{"from": ["input", "image"], "to": ["g", "image"]},
+                       {"from": ["g", "gray"], "to": ["o", "image"]}]}
+    pid = c.post("/api/pipelines", json={"title": "otsu", "graph": inner}).get_json()["pipeline_id"]
+    pub = c.post(f"/api/pipelines/{pid}/publish", json={}).get_json()["published_id"]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for n in ("x/1.png", "x/2.png", "x/readme.md"):
+            z.writestr(n, open(disk_png, "rb").read() if n.endswith(".png") else b"hi")
+    zb64 = base64.b64encode(buf.getvalue()).decode()
+
+    async def steps(s):
+        spec = json.loads(_text(await s.call_tool("describe_op", {"name": f"pipeline:{pub}"})))
+        up = json.loads(_text(await s.call_tool("upload_images", {"zip_base64": zb64})))
+        graph = {"nodes": [{"id": "seg", **{k: v for k, v in spec["node"].items() if k != "id"}, "params": {}},
+                           {"id": "n", "op": "to_number", "params": {"reduce": "count_nonzero"}}],
+                 "edges": [{"from": ["input", "image"], "to": ["seg", "image"]},
+                           {"from": ["seg", spec["outputs"][0]["name"]], "to": ["n", "value"]}]}
+        b = json.loads(_text(await s.call_tool("run_batch", {
+            "image_ids": [i["image_id"] for i in up["images"]], "graph": graph})))
+        for _ in range(600):
+            st = json.loads(_text(await s.call_tool("get_batch", {"batch_id": b["batch_id"]})))
+            if st["status"] not in ("queued", "running"):
+                break
+            await asyncio.sleep(0.5)
+        res = json.loads(_text(await s.call_tool("get_batch_results", {"batch_id": b["batch_id"], "limit": 1})))
+        return spec, up, st, res
+    spec, up, st, res = _call(mcp_url, key, steps)
+    assert [o["name"] for o in spec["outputs"]] == ["mask"] and spec["node"]["pipeline"]["published_id"] == pub
+    assert up["count"] == 2 and [s["filename"] for s in up["skipped"]] == ["readme.md"]
+    assert st["status"] == "done" and st["done"] == 2, st
+    assert res["total_rows"] == 2 and res["rows"] == 1 and res["next_offset"] == 1
+    assert "n.number" in res["csv"].splitlines()[0]

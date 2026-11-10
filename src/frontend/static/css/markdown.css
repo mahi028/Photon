@@ -234,3 +234,11 @@ pre.dracula-block code.hljs {
 #drawflow .drawflow-node .output:hover { background: #6366f1; }
 #drawflow .connection .main-path { stroke: #6366f1; stroke-width: 2.5px; }
 #drawflow .connection .main-path:hover { stroke: #a5b4fc; }
+
+#drawflow .df-node-sub-pipeline .df-node-title {   /* published pipeline used as a node (D-045) */
+  color: rgb(165 180 252);
+}
+#drawflow .drawflow-node:has(.df-node-sub-pipeline) {
+  border-style: dashed;
+  border-color: rgb(99 102 241 / 0.7);
+}

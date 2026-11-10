@@ -210,6 +210,43 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_user_image ON annotations (user_id, image_id)")
+        # Batch runs (D-046): one pipeline over many images, in the background.
+        # graph_json / customs_json are frozen at creation (edits don't touch a
+        # running batch); runner_pid lets a restart tell its own dead batches
+        # from ones another process (the MCP server) is still running.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS batches (
+                batch_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                source_json TEXT,
+                graph_json TEXT NOT NULL,
+                customs_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                runner_pid INTEGER,
+                cancel_requested INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_user ON batches (user_id, created_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS batch_items (
+                batch_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                image_id TEXT NOT NULL,
+                filename TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                values_json TEXT,
+                outputs_json TEXT,
+                tables_json TEXT,
+                seconds REAL,
+                PRIMARY KEY (batch_id, idx)
+            )
+        """)
         # Published pipelines (D-035): an instance-wide, immutable, versioned
         # snapshot of a user's pipeline. Each version freezes the graph AND the
         # code of every custom node it uses, so runs by other users never
@@ -1021,6 +1058,130 @@ def delete_annotation(annotation_id: str, user_id: str) -> bool:
     with closing(_get_conn()) as conn, conn:
         cur = conn.execute("DELETE FROM annotations WHERE annotation_id = ? AND user_id = ?",
                            (annotation_id, user_id))
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Batch runs (D-046)
+# ---------------------------------------------------------------------------
+
+def _batch_row(r) -> Dict[str, Any]:
+    d = dict(r)
+    d["source"] = json.loads(d.pop("source_json") or "{}")
+    d["graph"] = json.loads(d.pop("graph_json"))
+    d["custom_nodes"] = json.loads(d.pop("customs_json"))
+    d["cancel_requested"] = bool(d["cancel_requested"])
+    return d
+
+
+def create_batch(row: Dict[str, Any], items: List[Dict[str, Any]]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO batches (batch_id, user_id, title, source_json, graph_json, customs_json,
+                                 status, total, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["batch_id"], row["user_id"], row["title"], json.dumps(row.get("source") or {}),
+              json.dumps(row["graph"]), json.dumps(row.get("custom_nodes") or {}), row["status"],
+              len(items), row["created_at"]))
+        conn.executemany("""
+            INSERT INTO batch_items (batch_id, idx, image_id, filename, status) VALUES (?, ?, ?, ?, 'pending')
+        """, [(row["batch_id"], i, it["image_id"], it.get("filename")) for i, it in enumerate(items)])
+
+
+def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT * FROM batches WHERE batch_id = ?", (batch_id,)).fetchone()
+        if not r:
+            return None
+        d = _batch_row(r)
+        counts = dict(conn.execute("SELECT status, COUNT(*) FROM batch_items WHERE batch_id = ? GROUP BY status",
+                                   (batch_id,)).fetchall())
+        d["counts"] = counts
+        return d
+
+
+def list_batches(user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT b.batch_id, b.title, b.status, b.total, b.created_at, b.started_at, b.finished_at,
+                   b.source_json,
+                   SUM(CASE WHEN i.status = 'done' THEN 1 ELSE 0 END) AS done,
+                   SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failed
+            FROM batches b LEFT JOIN batch_items i ON i.batch_id = b.batch_id
+            WHERE b.user_id = ? GROUP BY b.batch_id ORDER BY b.created_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["source"] = json.loads(d.pop("source_json") or "{}")
+            out.append(d)
+        return out
+
+
+def update_batch(batch_id: str, **fields) -> None:
+    allowed = {"status", "started_at", "finished_at", "runner_pid", "cancel_requested"}
+    keys = [k for k in fields if k in allowed]
+    if not keys:
+        return
+    with closing(_get_conn()) as conn, conn:
+        conn.execute(f"UPDATE batches SET {', '.join(k + ' = ?' for k in keys)} WHERE batch_id = ?",
+                     [fields[k] for k in keys] + [batch_id])
+
+
+def list_batch_items(batch_id: str, statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        if statuses:
+            rows = conn.execute(f"""SELECT * FROM batch_items WHERE batch_id = ? AND status IN
+                                    ({','.join('?' * len(statuses))}) ORDER BY idx""",
+                                [batch_id, *statuses]).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM batch_items WHERE batch_id = ? ORDER BY idx",
+                                (batch_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("values", "outputs", "tables"):
+                d[k] = json.loads(d.pop(f"{k}_json") or ("{}" if k == "values" else "[]"))
+            out.append(d)
+        return out
+
+
+def update_batch_item(batch_id: str, idx: int, **fields) -> None:
+    cols = {"status": "status", "error": "error", "seconds": "seconds",
+            "values": "values_json", "outputs": "outputs_json", "tables": "tables_json"}
+    keys = [k for k in fields if k in cols]
+    vals = [json.dumps(fields[k]) if k in ("values", "outputs", "tables") else fields[k] for k in keys]
+    with closing(_get_conn()) as conn, conn:
+        conn.execute(f"UPDATE batch_items SET {', '.join(cols[k] + ' = ?' for k in keys)} "
+                     "WHERE batch_id = ? AND idx = ?", vals + [batch_id, idx])
+
+
+def reset_running_batch_items(batch_id: str) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE batch_items SET status = 'pending' WHERE batch_id = ? AND status = 'running'",
+                     (batch_id,))
+
+
+def claim_batch(batch_id: str, old_pid: Optional[int], new_pid: int) -> bool:
+    """Atomically take over a batch whose runner died. True if this process won."""
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("""UPDATE batches SET runner_pid = ? WHERE batch_id = ?
+                              AND status IN ('queued', 'running') AND runner_pid IS ?""",
+                           (new_pid, batch_id, old_pid))
+        return cur.rowcount > 0
+
+
+def active_batches() -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("SELECT batch_id, runner_pid FROM batches WHERE status IN ('queued', 'running')").fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_batch(batch_id: str, user_id: str) -> bool:
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("DELETE FROM batches WHERE batch_id = ? AND user_id = ?", (batch_id, user_id))
+        if cur.rowcount:
+            conn.execute("DELETE FROM batch_items WHERE batch_id = ?", (batch_id,))
         return cur.rowcount > 0
 
 

@@ -444,3 +444,45 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - **Guard.** skops loads native code through ctypes on import, which the sandbox guard blocks, so the child imports it before the guard is installed, only when the graph uses the save/load ops.
 
 **Why.** Train once (e.g. a random-forest pixel classifier from a few scribbles) and apply it to every image, or share it as a published pipeline. This is also the storage, safe format and versioning that model training on the GPU worker (phase 3) needs.
+
+## D-045 — Published pipelines as nodes
+
+**Decision.** A node can be a published pipeline pinned to one version: `{"id": "seg", "pipeline": {"published_id": ..., "version": 3}, "params": {"<inner node>.<param>": value}}`.
+
+- **Interface** (`subgraph.interface`, `GET /api/published/<id>/node?version=`):
+  - input `image` when the inner graph reads the source image;
+  - outputs are the inner graph's terminal outputs (the nodes nothing else reads), named by port, or `node.port` when two terminals share a port name;
+  - every inner param can be overridden as `node.param`; unset keeps the published value.
+- **Expansion in the parent** (`subgraph.expand`) before validation and before every run:
+  - inner nodes become `<node>/<inner>`;
+  - edges from the inner `input` are rewired to whatever feeds `image`;
+  - the version's frozen custom nodes come along under `<published_id>@<version>:<id>`, so they never collide with the viewer's library.
+
+  The sandbox only ever sees a plain graph. Nesting is allowed up to 4 deep, with at most 400 expanded nodes. Versions are immutable, so there can be no cycles.
+- **Reporting.** Validation issues and run failures inside the node are reported on it (`[inner] message`). Its values and preview come from the inner nodes producing its outputs. Inner outputs that nothing outside consumes stay final outputs.
+- **Unpublished pipelines.** A node whose pipeline was unpublished fails with "unpublished… fork it": the author's intent wins over downstream users.
+- **Where it shows up.** The editor palette has a "published pipelines" group, and the inspector shows the pinned version, owner and override params. The chat prompt and MCP instructions describe the node form.
+
+## D-046 — Batch runs
+
+**Decision.** `core/pipeline/batch.py`: one pipeline over up to 2000 images, in the background.
+
+- **Sources.**
+  - Pipeline: one of `pipeline_id`, `published_id` (+version) or a graph. The graph and the custom nodes it uses are frozen into the batch row at creation.
+  - Images: `image_ids` and/or every image of `session_ids`. `POST /api/batches/upload` takes loose files and `.zip` archives (entry count and size are capped, `__MACOSX` and dotfiles skipped, per-file size enforced on the bytes actually read). The page uploads in chunks under the request cap.
+- **Execution.**
+  - A shared thread pool (`PHOTON_BATCH_WORKERS`, default 2) runs one sandboxed pipeline per image through the same path as session runs: staged saved models and labels, pipeline-node expansion, saved-model registration.
+  - Batch runs set `export_tables`: the child also writes every table-like non-image value (dicts of equal-length columns, 1-D arrays) as CSV, so per-object results aren't lost to the 32-entry summaries.
+  - At most 3 active batches per user.
+- **Results.** Per image: status, error, seconds, values, output images (with 256-px previews) and tables. Downloads:
+  - `values.csv`: a row per image, a column per `node.port`;
+  - `table.csv?key=node.port`: every image's rows, tagged with index, filename and image_id;
+  - `download.zip`: all of the above plus output images.
+
+  Outputs live in `volumes/outputs/batches/<id>/`, not in a session, and are served only to the owner.
+- **Control.** Cancel stops after the running images. Retry re-runs failed and cancelled images. Delete removes results; the source images stay.
+- **Restarts.** Rows record the runner's pid. The first process to serve a request (Flask: on its first request, so a reloader's watcher process never claims work), or the MCP server at startup, atomically takes over batches whose process is gone and continues with the images not done.
+- **Interfaces.**
+  - Pages `/batches` and `/batches/<id>`, and a "Batch…" button in the editor.
+  - MCP: `upload_images` (a zip as base64 or URL, or server paths/folders), `run_batch`, `get_batch`, `get_batch_results` (values CSV or one table, paged as CSV text) and `cancel_batch`.
+  - `describe_op("pipeline:<published_id>[@v]")` gives a published pipeline's node interface and the exact node JSON.

@@ -64,6 +64,41 @@ def _to_preview_array(value):
         arr = (arr - lo) / (hi - lo) * 255.0
     return np.clip(arr, 0, 255).astype(np.uint8)
 
+def _fname(nid):
+    """Node id -> file name. Expanded pipeline nodes are 'outer/inner' (D-045)."""
+    return "".join(c if c.isalnum() or c in "-_." else "~" for c in str(nid))
+
+_TABLES = []      # full non-image tables written as CSV (batch runs, D-046)
+
+def _write_table(nid, port, v):
+    """dict of equal-length 1-D columns (regionprops_table) or a 1-D array -> CSV."""
+    import csv
+    if isinstance(v, dict):
+        cols = {}
+        for k, c in v.items():
+            a = np.asarray(c)
+            if a.ndim == 1 and a.dtype.kind in "biufUS":
+                cols[str(k)] = a
+        lens = {len(a) for a in cols.values()}
+        if not cols or len(lens) != 1:
+            return
+    elif isinstance(v, np.ndarray) and v.ndim == 1 and v.dtype.kind in "biuf":
+        cols = {"value": v}
+    else:
+        return
+    n = len(next(iter(cols.values())))
+    if not n or n > 1_000_000:
+        return
+    d = Path(JOB["output_dir"]) / "tables"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{_fname(nid)}~{_fname(port)}.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(list(cols))
+        for row in zip(*[a.tolist() for a in cols.values()]):
+            w.writerow(row)
+    _TABLES.append({"node_id": nid, "port": port, "path": str(path), "rows": n})
+
 def _is_image(v):
     return (isinstance(v, np.ndarray) and v.ndim in (2, 3) and min(v.shape[:2]) >= 2
             and v.dtype.kind in "biuf")
@@ -126,12 +161,17 @@ def main():
                         values.setdefault(nid, {})[port_name] = _summary(v)
                     except Exception:
                         values.setdefault(nid, {})[port_name] = f"<{type(v).__name__}>"
+                    if JOB.get("export_tables"):
+                        try:
+                            _write_table(nid, port_name, v)
+                        except Exception:
+                            pass
             images = [(k, v) for k, v in outs.items() if _is_image(v)]
             if not images:
                 return
             port, value = images[0]
             try:
-                p = node_dir / f"{nid}.jpg"
+                p = node_dir / f"{_fname(nid)}.jpg"
                 Image.fromarray(_to_preview_array(value)).convert("RGB").save(p, quality=85)
                 previews[nid] = {"port": port, "path": str(p)}
             except Exception:
@@ -145,7 +185,7 @@ def main():
         for port, value in outs.items():
             if not _is_image(value):
                 continue            # reported in `values`, not saved as an image
-            out_path = Path(JOB["output_dir"]) / f"{nid}_{port}.png"
+            out_path = Path(JOB["output_dir"]) / f"{_fname(nid)}_{port}.png"
             Path(JOB["output_dir"]).mkdir(parents=True, exist_ok=True)
             Image.fromarray(_to_preview_array(value)).save(out_path)
             finals.append({"node_id": nid, "port": port, "path": str(out_path)})
@@ -158,6 +198,7 @@ def main():
         "finals": finals,
         "values": values,
         "saved_models": _ml.RUNTIME["saved"],
+        "tables": _TABLES,
     }, open(JOB["result_path"], "w"))
 
 try:
@@ -190,6 +231,7 @@ def run_pipeline_subprocess(
     timeout: Optional[int] = None,
     input_mode: str = "RGB",
     assets: dict[str, str] | None = None,
+    export_tables: bool = False,
 ) -> dict[str, Any]:
     """Execute a graph out-of-process. Returns the child's result manifest
     plus wall-clock timing, or a synthetic error dict on timeout/crash.
@@ -230,6 +272,7 @@ def run_pipeline_subprocess(
     job = {
         "repo_root": repo_root,
         "assets": staged,
+        "export_tables": bool(export_tables),
         "graph": graph,
         "custom_nodes": custom_nodes or {},
         "input_path": input_path,
