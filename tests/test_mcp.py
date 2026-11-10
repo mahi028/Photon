@@ -92,6 +92,36 @@ def test_api_key_lifecycle(mcp_url, make_user, app):
     assert _raw_status(mcp_url, f"Bearer {k2['key']}") == 401
 
 
+def test_key_scopes(mcp_url, make_user):
+    """read < run < write (D-043): each tool checks the key's scope."""
+    c, _, _ = make_user()
+    assert c.post("/api/keys", json={"name": "x", "scope": "admin"}).status_code == 400
+    keys = {sc: c.post("/api/keys", json={"name": sc, "scope": sc}).get_json() for sc in ("read", "run", "write")}
+    assert {k["scope"] for k in c.get("/api/keys").get_json()} == {"read", "run", "write"}
+    assert c.post("/api/keys", json={"name": "legacy"}).get_json()["scope"] == "write"
+
+    async def probe(s):
+        out = {"list": not (await s.call_tool("list_sessions", {})).is_error}
+        r = await s.call_tool("create_session", {"title": "scoped"})
+        out["create"] = not r.is_error
+        out["create_msg"] = _text(r)
+        g = {"nodes": [{"id": "g", "op": "to_grayscale"}],
+             "edges": [{"from": ["input", "image"], "to": ["g", "image"]}]}
+        out["save"] = not (await s.call_tool("save_pipeline", {"title": "s", "graph": g})).is_error
+        out["models"] = not (await s.call_tool("list_models", {})).is_error
+        r = await s.call_tool("save_labels", {"image_id": "0" * 32, "data_base64": ""})
+        out["labels_msg"] = _text(r)
+        return out
+    got = {sc: _call(mcp_url, k["key"], probe) for sc, k in keys.items()}
+    assert [got[sc]["list"] for sc in keys] == [True, True, True]
+    assert [got[sc]["create"] for sc in keys] == [False, True, True]
+    assert [got[sc]["save"] for sc in keys] == [False, False, True]
+    assert "needs a 'run' API key" in got["read"]["create_msg"]
+    assert all(got[sc]["models"] for sc in keys)
+    assert "needs a 'run' API key" in got["read"]["labels_msg"]
+    assert "not found" in got["run"]["labels_msg"]
+
+
 def test_tools_upload_run_download_delete(mcp_url, make_user, upload, disk_png):
     c, _, _ = make_user()
     other, _, _ = make_user()

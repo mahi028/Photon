@@ -173,6 +173,43 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id)")
+        # Saved models (D-044): fitted scikit-learn models stored as skops files
+        # in volumes/trained_models/<model_id>.skops. Rows are immutable once
+        # written; published=1 means a published pipeline loads it, so anyone
+        # running that pipeline may read it and the file is kept after delete.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trained_models (
+                model_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                estimator TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                versions_json TEXT,
+                session_id TEXT,
+                pipeline_title TEXT,
+                summary TEXT,
+                created_at TEXT NOT NULL,
+                published INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trained_models_user ON trained_models (user_id)")
+        # Label images painted in the UI (D-044): volumes/annotations/<id>.png,
+        # uint8, 0 = unlabeled, 1..N = classes. One per (user, image, name).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS annotations (
+                annotation_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                image_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                classes_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_user_image ON annotations (user_id, image_id)")
         # Published pipelines (D-035): an instance-wide, immutable, versioned
         # snapshot of a user's pipeline. Each version freezes the graph AND the
         # code of every custom node it uses, so runs by other users never
@@ -224,6 +261,12 @@ def init_db():
         # {"scikit-image": "0.25.2", "numpy": "2.2.0"}. NULL for older rows.
         try:
             conn.execute("ALTER TABLE published_pipeline_versions ADD COLUMN env_json TEXT")
+        except Exception:
+            pass
+        # What an API key may do (D-043): read < run < write. Keys from before
+        # this column had full access, so they default to 'write'.
+        try:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'")
         except Exception:
             pass
 
@@ -847,19 +890,19 @@ def set_published_unpublished(published_id: str, owner_id: str, unpublished_at: 
 # ---------------------------------------------------------------------------
 
 def create_api_key(key_id: str, user_id: str, name: str, key_hash: str, prefix: str,
-                   created_at: str, expires_at: Optional[str]) -> None:
+                   created_at: str, expires_at: Optional[str], scope: str = "write") -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
-            INSERT INTO api_keys (key_id, user_id, name, key_hash, prefix, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (key_id, user_id, name, key_hash, prefix, created_at, expires_at))
+            INSERT INTO api_keys (key_id, user_id, name, key_hash, prefix, created_at, expires_at, scope)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (key_id, user_id, name, key_hash, prefix, created_at, expires_at, scope))
 
 
 def list_api_keys(user_id: str) -> List[Dict[str, Any]]:
     """A user's keys, newest first. Never includes the hash."""
     with closing(_get_conn()) as conn, conn:
         rows = conn.execute("""
-            SELECT key_id, name, prefix, created_at, last_used_at, expires_at, revoked_at
+            SELECT key_id, name, prefix, scope, created_at, last_used_at, expires_at, revoked_at
             FROM api_keys WHERE user_id = ? ORDER BY created_at DESC
         """, (user_id,)).fetchall()
         return [dict(r) for r in rows]
@@ -884,6 +927,101 @@ def revoke_api_key(key_id: str, user_id: str, revoked_at: str) -> bool:
 def touch_api_key(key_id: str, used_at: str) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("UPDATE api_keys SET last_used_at = ? WHERE key_id = ?", (used_at, key_id))
+
+
+# ---------------------------------------------------------------------------
+# Saved models and annotations (D-044)
+# ---------------------------------------------------------------------------
+
+def _model_row(r) -> Dict[str, Any]:
+    d = dict(r)
+    d["versions"] = json.loads(d.pop("versions_json") or "{}")
+    d["published"] = bool(d["published"])
+    return d
+
+
+def add_trained_model(row: Dict[str, Any]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO trained_models (model_id, user_id, name, estimator, size_bytes, versions_json,
+                                        session_id, pipeline_title, summary, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["model_id"], row["user_id"], row["name"], row["estimator"], row["size_bytes"],
+              json.dumps(row.get("versions") or {}), row.get("session_id"), row.get("pipeline_title"),
+              row.get("summary"), row["created_at"]))
+
+
+def get_trained_model(model_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT * FROM trained_models WHERE model_id = ?", (model_id,)).fetchone()
+        return _model_row(r) if r else None
+
+
+def list_trained_models(user_id: str) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT * FROM trained_models WHERE user_id = ? AND deleted_at IS NULL
+            ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
+        return [_model_row(r) for r in rows]
+
+
+def mark_models_published(model_ids: List[str]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.executemany("UPDATE trained_models SET published = 1 WHERE model_id = ?",
+                         [(m,) for m in model_ids])
+
+
+def delete_trained_model(model_id: str, user_id: str, deleted_at: str) -> bool:
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("""
+            UPDATE trained_models SET deleted_at = ?
+            WHERE model_id = ? AND user_id = ? AND deleted_at IS NULL
+        """, (deleted_at, model_id, user_id))
+        return cur.rowcount > 0
+
+
+def _annotation_row(r) -> Dict[str, Any]:
+    d = dict(r)
+    d["classes"] = json.loads(d.pop("classes_json") or "[]")
+    return d
+
+
+def upsert_annotation(row: Dict[str, Any]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO annotations (annotation_id, user_id, image_id, name, width, height,
+                                     classes_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(annotation_id) DO UPDATE SET name = excluded.name,
+                width = excluded.width, height = excluded.height,
+                classes_json = excluded.classes_json, updated_at = excluded.updated_at
+        """, (row["annotation_id"], row["user_id"], row["image_id"], row["name"], row["width"],
+              row["height"], json.dumps(row.get("classes") or []), row["created_at"], row["updated_at"]))
+
+
+def get_annotation(annotation_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT * FROM annotations WHERE annotation_id = ?", (annotation_id,)).fetchone()
+        return _annotation_row(r) if r else None
+
+
+def list_annotations(user_id: str, image_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        if image_id:
+            rows = conn.execute("""SELECT * FROM annotations WHERE user_id = ? AND image_id = ?
+                                   ORDER BY updated_at DESC""", (user_id, image_id)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM annotations WHERE user_id = ? ORDER BY updated_at DESC",
+                                (user_id,)).fetchall()
+        return [_annotation_row(r) for r in rows]
+
+
+def delete_annotation(annotation_id: str, user_id: str) -> bool:
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("DELETE FROM annotations WHERE annotation_id = ? AND user_id = ?",
+                           (annotation_id, user_id))
+        return cur.rowcount > 0
 
 
 def load_user(user_id: str) -> Optional[Dict[str, Any]]:

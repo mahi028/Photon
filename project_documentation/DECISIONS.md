@@ -414,3 +414,33 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - DBSCAN.
 
 **Performance note.** Importing scikit-learn takes about 1 s normally, but took over 100 s while the shared filesystem was slow. Pipeline timeouts (`EXECUTION_TIMEOUT_SECONDS` × 4) may need raising on such hosts.
+
+## D-043 — API key scopes
+
+**Decision.** Every API key has one scope. Scopes are levels, each including the one before:
+
+- `read`: list and view sessions, outputs, ops, pipelines and runs; validate graphs.
+- `run`: also upload images, create, attach and detach sessions, and run pipelines.
+- `write`: also save, publish, unpublish and fork pipelines, and delete sessions.
+
+**How.**
+- New `api_keys.scope` column. Keys made before it default to `write`, since they had full access.
+- `POST /api/keys` takes `scope` (default `write`, so existing API clients keep working). The keys page defaults to `run` with a 90-day expiry, so new keys are least-privilege by default.
+- The MCP verifier puts the scope on the access token. Each tool is registered with the scope it needs (`_tool(scope=...)`) and refuses with a message naming the scope it needs and the key's scope.
+- stdio has no key: it is the local user and keeps full access.
+
+**Why.** A leaked `run` key can process images in the owner's account but can't publish under their name, overwrite their pipelines or delete sessions. A `read` key suits dashboards and agents that only fetch results.
+
+## D-044 — Saved models and painted labels
+
+**Decision.** Fitted models can outlive a run, and users can paint training labels in the UI.
+
+- **Saving.** `ml_save_model(model, name)` ends a training graph. The child writes the model with **skops** into the run's output dir; after the run, `saved.register_saved` moves it to `volumes/trained_models/<id>.skops` and adds a `trained_models` row (name, estimator, size, sklearn/numpy/skops versions, source session and pipeline). Each save is a new immutable row.
+- **Loading.** `ml_load_model(model_id)` → `ml_predict`. The parent checks access and stages the file into the run's scratch dir; the child only ever reads the staged copy (`executor` `assets`; the remote worker receives them as extra multipart files).
+- **Safe format, not pickle.** `loads_model` refuses any type skops doesn't trust except four sklearn internals our estimators contain (`Tree`, `TreePredictor`, `KDTree`, `BallTree`, plus distance metrics), then checks the top-level class is one of the allow-listed estimators (D-042). A crafted file can't run code on load. `Birch` can't be saved (skops doesn't support it); the op says so.
+- **Painted labels.** "✎ Labels" on a session image opens a painter: classes with names and colours, brush, eraser, undo, multiple named label sets. Labels are stored as an 8-bit PNG (0 = unlabeled, 1..16 = class) at the image's full resolution (`annotations` table, `volumes/annotations/<id>.png`). `load_labels(annotation_id)` reads one; an empty id means the latest set painted on the image being processed, so one training pipeline works on any image you've painted. Sizes must match the image.
+- **Publishing.** A published graph may load models its author owns (or already-published ones, so forks keep working); publishing marks them `published`, which lets anyone running that pipeline load them, and deleting such a model only hides it from its owner (the file stays). Specific annotation ids can't be published: labels are private and tied to one image.
+- **APIs.** `GET/DELETE /api/models`, `GET/POST/DELETE /api/annotations`, `GET /api/annotations/<id>/image`. MCP: `list_models`, `list_labels` (read) and `save_labels` (run, PNG base64); run results include `saved_models`. The pipeline editor shows pickers for `model_id` / `annotation_id`; the pipelines page lists saved models.
+- **Guard.** skops loads native code through ctypes on import, which the sandbox guard blocks, so the child imports it before the guard is installed, only when the graph uses the save/load ops.
+
+**Why.** Train once (e.g. a random-forest pixel classifier from a few scribbles) and apply it to every image, or share it as a published pipeline. This is also the storage, safe format and versioning that model training on the GPU worker (phase 3) needs.

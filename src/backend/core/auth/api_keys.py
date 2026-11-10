@@ -22,23 +22,39 @@ _DISPLAY_PREFIX_LEN = 10          # "pk_" + 7 chars — enough to tell keys apar
 _TOUCH_INTERVAL = timedelta(minutes=1)
 MAX_NAME_LEN = 80
 
+# Scopes are levels (D-043): each includes the ones before it.
+#   read   look: list/get sessions, outputs, ops, pipelines, runs; validate graphs
+#   run    + upload images, create/attach/detach sessions, run pipelines
+#   write  + save, publish, unpublish, fork pipelines; delete sessions
+SCOPES = ("read", "run", "write")
+
+
+def allows(scope: Optional[str], needed: str) -> bool:
+    """True if a key with `scope` may do something that needs `needed`."""
+    if scope not in SCOPES:
+        return False
+    return SCOPES.index(scope) >= SCOPES.index(needed)
+
 
 def _hash(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def create_key(user_id: str, name: str, expires_in_days: Optional[int] = None) -> dict[str, Any]:
+def create_key(user_id: str, name: str, expires_in_days: Optional[int] = None,
+               scope: str = "write") -> dict[str, Any]:
     """Mint a key. The returned dict holds the plaintext under 'key' — the only
     time it exists outside the caller's hands."""
     key = KEY_PREFIX + secrets.token_urlsafe(32)
     key_id = uuid.uuid4().hex
     now = datetime.utcnow()
     expires_at = (now + timedelta(days=expires_in_days)).isoformat() if expires_in_days else None
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}")
     name = (name or "").strip()[:MAX_NAME_LEN] or "Untitled key"
     store.create_api_key(key_id, user_id, name, _hash(key), key[:_DISPLAY_PREFIX_LEN],
-                         now.isoformat(), expires_at)
+                         now.isoformat(), expires_at, scope)
     return {"key_id": key_id, "key": key, "name": name, "prefix": key[:_DISPLAY_PREFIX_LEN],
-            "created_at": now.isoformat(), "expires_at": expires_at}
+            "scope": scope, "created_at": now.isoformat(), "expires_at": expires_at}
 
 
 def list_keys(user_id: str) -> list[dict[str, Any]]:

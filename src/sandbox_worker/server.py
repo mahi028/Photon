@@ -87,6 +87,19 @@ class _Job:
         self.nodes = self.dir / "nodes"
         self.out.mkdir()
         self.nodes.mkdir()
+        # Staged saved models / painted labels (D-044): job["assets"] maps an
+        # asset key to the multipart field carrying its file.
+        self.assets = {}
+        fields = self.job.get("assets") or {}
+        if not isinstance(fields, dict) or len(fields) > 32:
+            raise ValueError("bad 'assets'")
+        for key, field in fields.items():
+            if not (isinstance(key, str) and isinstance(field, str) and field.startswith("asset")
+                    and field[5:].isdigit() and field in request.files):
+                raise ValueError(f"bad asset field {field!r}")
+            p = self.dir / f"{field}.bin"
+            request.files[field].save(p)
+            self.assets[key] = str(p)
         self.timeout = max(1, min(int(self.job.get("timeout") or 60), 3600))
         return self
 
@@ -151,10 +164,11 @@ def run_pipeline(job: _Job):
     from src.backend.core.pipeline.executor import run_pipeline_subprocess
     r = run_pipeline_subprocess(job.job.get("graph") or {}, str(job.input), str(job.out), str(job.nodes),
                                 custom_nodes=job.job.get("custom_nodes") or {}, timeout=job.timeout,
-                                input_mode=job.job.get("input_mode") or "RGB")
+                                input_mode=job.job.get("input_mode") or "RGB", assets=job.assets)
     r["previews"] = {nid: {**p, "path": _rel(p.get("path"), job.nodes)}
                      for nid, p in (r.get("previews") or {}).items()}
     r["finals"] = [{**f, "path": _rel(f.get("path"), job.out)} for f in r.get("finals") or []]
+    r["saved_models"] = [{**m, "path": _rel(m.get("path"), job.out)} for m in r.get("saved_models") or []]
     return _zip_result(r, {"out": job.out, "nodes": job.nodes})
 
 

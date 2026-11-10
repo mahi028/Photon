@@ -135,3 +135,23 @@ def test_app_run_route_uses_remote(remote, make_user, upload):
     outs = m.get_session(sid).outputs
     assert outs and Path(outs[-1].path).is_file()
     assert json.loads(outs[-1].code)["nodes"][0]["op"] == "to_grayscale"
+
+
+def test_remote_assets_and_saved_models(remote, disk_png, tmp_path):
+    """Saved models / labels go to the worker as files; ml_save_model files come back (D-044)."""
+    import numpy as np
+    from PIL import Image
+    from tests.test_saved_models import TRAIN, _scribbles, apply_graph
+    labels = tmp_path / "labels.png"
+    Image.fromarray(_scribbles()).save(labels)
+    out = Path(tempfile.mkdtemp(dir=config.TMP_EXEC_DIR))
+    r = backend.run_pipeline(TRAIN, disk_png, str(out), str(out / "nodes"), assets={"labels:": str(labels)})
+    assert not r["error"], r["error"]
+    [m] = r["saved_models"]
+    assert Path(m["path"]).is_file() and Path(m["path"]).is_relative_to(out)
+    out2 = Path(tempfile.mkdtemp(dir=config.TMP_EXEC_DIR))
+    r = backend.run_pipeline(apply_graph("a" * 32), disk_png, str(out2), str(out2 / "nodes"),
+                             assets={f"model:{'a' * 32}": m["path"]})
+    assert not r["error"], r["error"]
+    pred = np.asarray(Image.open(r["finals"][0]["path"]))
+    assert pred[48, 64] == 1 and pred[5, 120] == 2

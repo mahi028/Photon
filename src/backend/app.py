@@ -49,6 +49,7 @@ def create_app() -> Flask:
     from .api.shared_routes import shared_bp
     from .api.llm_routes import llm_bp
     from .api.api_key_routes import api_key_bp
+    from .api.saved_routes import saved_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(llm_bp, url_prefix="/api")
@@ -60,6 +61,7 @@ def create_app() -> Flask:
     app.register_blueprint(download_bp, url_prefix="/api")
     app.register_blueprint(example_bp, url_prefix="/api")
     app.register_blueprint(api_key_bp, url_prefix="/api")
+    app.register_blueprint(saved_bp, url_prefix="/api")
     app.register_blueprint(shared_bp)
 
     # Serve preview images from volumes/uploads

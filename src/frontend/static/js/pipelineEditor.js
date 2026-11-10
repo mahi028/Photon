@@ -53,6 +53,10 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
     // --- lifecycle -------------------------------------------------------
 
+    savedModels: [],
+    savedLabels: [],
+    _assetsLoading: false,
+
     async init() {
       if (typeof Drawflow === 'undefined') {
         this.loadFailed = true;
@@ -329,6 +333,23 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
     jsonInvalid(p) {
       return `${this.selectedNodeId}:${p.name}` in this.jsonDrafts;
+    },
+
+    // Saved models / painted labels pickers (D-044)
+    assetParam(p) {
+      const op = this.selectedSpec && this.selectedSpec.name;
+      if (op === 'ml_load_model' && p.name === 'model_id') { this._loadAssets(); return 'model'; }
+      if (op === 'load_labels' && p.name === 'annotation_id') { this._loadAssets(); return 'labels'; }
+      return null;
+    },
+
+    _loadAssets() {
+      if (this._assetsLoading) return;
+      this._assetsLoading = true;
+      fetch('/api/models').then(r => r.ok ? r.json() : {models: []})
+        .then(d => { this.savedModels = d.models || []; });
+      fetch('/api/annotations').then(r => r.ok ? r.json() : {annotations: []})
+        .then(d => { this.savedLabels = d.annotations || []; });
     },
 
     setParam(name, value, kind) {
@@ -618,6 +639,10 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
         }
         if (ev.event === 'pipeline_error') {
           this.runError = `${ev.failed_node || 'pipeline'}: ${ev.message}`;
+        }
+        if (ev.event === 'model_saved') {
+          this.savedModels = [ev.model, ...this.savedModels];
+          window.ui && window.ui.toast(`Saved model "${ev.model.name}" (${ev.model.estimator}).`, 'success');
         }
       };
       es.onerror = () => { es.close(); this.running = false; };

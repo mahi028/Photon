@@ -29,6 +29,12 @@
         <form class="flex flex-col sm:flex-row gap-2" @submit.prevent="create()">
           <input x-model="newName" type="text" maxlength="80" required placeholder="Name, e.g. laptop Claude Code"
                  class="flex-1 min-w-0 bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500" />
+          <select x-model="newScope" title="What clients using this key may do"
+                  class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-indigo-500">
+            <option value="read">Read only</option>
+            <option value="run">Read + run</option>
+            <option value="write">Full access</option>
+          </select>
           <select x-model="newExpiry"
                   class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-indigo-500">
             <option value="">Never expires</option>
@@ -39,6 +45,7 @@
           </select>
           <button type="submit" class="btn-primary text-sm" :disabled="creating || !newName.trim()">Create key</button>
         </form>
+        <p class="text-[11px] text-gray-500" x-text="scopeHelp[newScope]"></p>
         <p x-show="error" x-text="error" class="text-xs text-red-400" style="display:none;"></p>
       </section>
 
@@ -85,6 +92,7 @@
                 <div class="flex items-center gap-2 min-w-0">
                   <span class="text-sm font-medium text-gray-100 truncate" x-text="k.name"></span>
                   <span x-show="k.status === 'active'" class="badge-manual">active</span>
+                  <span class="text-xs bg-gray-800 text-gray-300 px-1.5 py-0.5 rounded" :title="scopeHelp[k.scope]" x-text="scopeLabel[k.scope] || k.scope"></span>
                   <span x-show="k.status === 'revoked'" class="text-xs bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">revoked</span>
                   <span x-show="k.status === 'expired'" class="text-xs bg-amber-900 text-amber-300 px-1.5 py-0.5 rounded">expired</span>
                 </div>
@@ -117,7 +125,14 @@ function apiKeys() {
     loading: true,
     creating: false,
     newName: '',
-    newExpiry: '',
+    newExpiry: '90',
+    newScope: 'run',
+    scopeLabel: {read: 'read only', run: 'read + run', write: 'full access'},
+    scopeHelp: {
+      read: 'Read only: list and view sessions, outputs, ops and pipelines. Cannot upload, run or change anything.',
+      run: 'Read + run: also upload images, create sessions and run pipelines. Cannot save, publish or delete.',
+      write: 'Full access: also save, publish, unpublish and fork pipelines, and delete sessions.',
+    },
     created: null,
     copied: null,
     error: '',
@@ -143,13 +158,13 @@ function apiKeys() {
           body: JSON.stringify({
             name: this.newName.trim(),
             expires_in_days: this.newExpiry ? Number(this.newExpiry) : null,
+            scope: this.newScope,
           }),
         });
         const data = await res.json();
         if (!res.ok) { this.error = data.error || 'Could not create key'; return; }
         this.created = data;
         this.newName = '';
-        this.newExpiry = '';
         await this.load();
       } finally {
         this.creating = false;

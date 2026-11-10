@@ -19,7 +19,7 @@ from flask import Blueprint, jsonify, request
 from ..config import config
 from ..core.auth.middleware import get_current_user_id, login_required
 from ..core.image.thumbnail import generate_thumbnail
-from ..core.pipeline import publishing, registry, runner
+from ..core.pipeline import publishing, registry, runner, saved
 from ..core.sandbox import backend as sandbox_backend
 from ..core.sandbox.subprocess_executor import ASTSecurityError, _check_ast_safety
 from ..core.session import store
@@ -348,6 +348,7 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
     run_id = uuid.uuid4().hex[:8]
     outputs_made: list[dict] = []
     values_by_slot: dict[int, dict] = {}   # non-image outputs (numbers, tables...)
+    models_saved: list[dict] = []           # ml_save_model results (D-044)
     last_error = None
 
     try:
@@ -362,10 +363,21 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                   "image_id": image_id, "title": title,
                   "node_count": len(graph.get("nodes") or [])})
 
+            try:
+                assets = saved.stage(graph, user_id, image_id, (meta.shape[1], meta.shape[0]))
+            except saved.AssetError as e:
+                last_error = str(e)
+                push({"event": "pipeline_error", "image_slot": slot_idx,
+                      "failed_node": None, "message": last_error})
+                continue
             result = sandbox_backend.run_pipeline(
                 graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
-                input_mode="RGB" if meta.channel_count >= 3 else "L",
+                input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets,
             )
+            for m in saved.register_saved(user_id, result.get("saved_models") or [],
+                                          session_id, title):
+                models_saved.append({**m, "image_slot": slot_idx})
+                push({"event": "model_saved", "image_slot": slot_idx, "model": m})
 
             for ev in result.get("events", []):
                 push({"event": f"node_{ev['phase']}", "node_id": ev["node_id"],
@@ -428,7 +440,7 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
             manager.set_status(session_id, "idle")
 
     return {"error": last_error, "outputs": outputs_made, "run_id": run_id,
-            "values": values_by_slot}
+            "values": values_by_slot, "saved_models": models_saved}
 
 
 @pipeline_bp.route("/sessions/<session_id>/run-pipeline", methods=["POST"])

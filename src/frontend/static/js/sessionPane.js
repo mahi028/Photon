@@ -215,6 +215,9 @@ function sessionPane(sess) {
           const msg = this._lastPipelineMessage();
           if (msg) msg.nodeValues = {...(msg.nodeValues || {}), ...event.values};
         }
+        if (event.event === 'model_saved') {
+          window.ui && window.ui.toast(`Saved model "${event.model.name}" (${event.model.estimator}).`, 'success');
+        }
         if (event.event === 'pipeline_invalid') {
           const msg = this._lastPipelineMessage();
           if (msg) msg.pipelineIssues = event.issues || [];

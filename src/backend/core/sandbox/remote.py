@@ -57,18 +57,31 @@ def _settings() -> tuple[str, str]:
     return url, token
 
 
-def _post(endpoint: str, job: dict, input_path: str, timeout: int) -> bytes:
+def _post(endpoint: str, job: dict, input_path: str, timeout: int,
+          extra_files: dict[str, str] | None = None) -> bytes:
+    """extra_files: multipart field -> local path (staged assets, D-044)."""
     url, token = _settings()
-    with open(input_path, "rb") as f:
+    handles = []
+    try:
+        f = open(input_path, "rb")
+        handles.append(f)
+        files = {"input": (Path(input_path).name, f)}
+        for field, path in (extra_files or {}).items():
+            h = open(path, "rb")
+            handles.append(h)
+            files[field] = (Path(path).name, h)
         r = requests.post(
             f"{url}{endpoint}",
             headers={"Authorization": f"Bearer {token}"},
             data={"job": json.dumps(job)},
-            files={"input": (Path(input_path).name, f)},
+            files=files,
             # worker enforces the job timeout itself; allow transfer overhead
             timeout=(10, timeout + 60),
             stream=True,
         )
+    finally:
+        for h in handles:
+            h.close()
     if r.status_code != 200:
         raise RemoteSandboxError(f"sandbox worker HTTP {r.status_code}: {r.text[:300]}")
     body = io.BytesIO()
@@ -151,7 +164,7 @@ class RemoteExecutor(Executor):
 
 def run_pipeline_remote(graph: dict, input_path: str, output_dir: str, node_preview_dir: str,
                         custom_nodes: dict | None = None, timeout: Optional[int] = None,
-                        input_mode: str = "RGB") -> dict[str, Any]:
+                        input_mode: str = "RGB", assets: dict[str, str] | None = None) -> dict[str, Any]:
     """Same signature and result shape as executor.run_pipeline_subprocess."""
     timeout = timeout or config.EXECUTION_TIMEOUT_SECONDS * 4
     t0 = time.time()
@@ -159,9 +172,12 @@ def run_pipeline_remote(graph: dict, input_path: str, output_dir: str, node_prev
     out.mkdir(parents=True, exist_ok=True)
     nodes.mkdir(parents=True, exist_ok=True)
     try:
+        keys = sorted(assets or {})
         data = _post("/v1/run-pipeline", {"graph": graph, "custom_nodes": custom_nodes or {},
-                                          "timeout": timeout, "input_mode": input_mode},
-                     input_path, timeout)
+                                          "timeout": timeout, "input_mode": input_mode,
+                                          "assets": {k: f"asset{i}" for i, k in enumerate(keys)}},
+                     input_path, timeout,
+                     extra_files={f"asset{i}": assets[k] for i, k in enumerate(keys)})
         r = safe_extract(data, {"out": out, "nodes": nodes})
     except (RemoteSandboxError, requests.RequestException) as e:
         return {"error": f"Remote sandbox error: {e}", "failed_node": None, "events": [],
@@ -170,4 +186,6 @@ def run_pipeline_remote(graph: dict, input_path: str, output_dir: str, node_prev
                      for nid, p in (r.get("previews") or {}).items() if _local(p.get("path"), nodes)}
     r["finals"] = [{**f, "path": _local(f.get("path"), out)}
                    for f in r.get("finals") or [] if _local(f.get("path"), out)]
+    r["saved_models"] = [{**m, "path": _local(m.get("path"), out)}
+                         for m in r.get("saved_models") or [] if _local(m.get("path"), out)]
     return r

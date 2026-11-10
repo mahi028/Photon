@@ -14,6 +14,7 @@ Photon is an autonomous, natural-language image processing studio. Upload any im
 - **Universal Format Support**: Works flawlessly with standard RGB/RGBA formats, grayscale, and even float32 multispectral `.npy` arrays.
 - **Library Nodes**: about 600 functions from scikit-image, `scipy.ndimage` and OpenCV are pipeline nodes, generated from their signatures and docstrings (`lib:skimage.filters.threshold_multiotsu`). Search them in the editor palette, `list_ops(query=...)` over MCP, or let the chat assistant pick them. Small glue nodes (`digitize`, `get_item`, `math`, `compare`, `astype`, ...) connect thresholds, tuples and tables to the next step.
 - **Machine Learning Nodes**: scikit-learn models (k-means, Gaussian mixtures, random forests, SVMs, PCA, scalers...) as nodes, plus `ml_fit_predict` / `ml_fit` / `ml_predict` on pixels or on per-object tables. Examples: colour clustering, a random-forest pixel classifier trained from coarse labels, clustering nuclei by shape and painting the clusters back with `map_labels`.
+- **Saved Models & Label Painting**: paint a few strokes per class on an image (✎ Labels), train on them with `load_labels` → `ml_fit`, and keep the model with `ml_save_model`. Apply it to any image, or publish it, with `ml_load_model` → `ml_predict`. Models are stored in the skops format, which refuses to load unknown types, never pickle.
 - **Manual Mode**: Need exact control? Drop into the built-in code editor to write or tweak the Python execution script yourself.
 - **Visual Version Control**: Interactive carousels, side-by-side comparisons, and filmstrips make it easy to track every iteration of your image.
 - **Export Ready**: Download your selected full-resolution outputs packaged in a neat ZIP archive.
@@ -119,7 +120,7 @@ claude mcp add --transport http photon http://<host>:8890/mcp \
   --header "Authorization: Bearer pk_..."
 ```
 
-Each call acts as the key's owner, so results appear in that user's sessions. Keys can expire (7/30/90/365 days) and can be revoked from the same page; only a SHA-256 hash is stored. If clients reach the server through a proxy or port-forward, set `PHOTON_MCP_PUBLIC_URL` (e.g. `http://172.20.23.234:10227/mcp`) so the API keys page shows the right URL in its copy-paste command.
+Each call acts as the key's owner, so results appear in that user's sessions. Keys have a scope (**read only**, **read + run**, or **full access** to also save, publish and delete), can expire (7/30/90/365 days), and can be revoked from the same page; only a SHA-256 hash is stored. If clients reach the server through a proxy or port-forward, set `PHOTON_MCP_PUBLIC_URL` (e.g. `http://172.20.23.234:10227/mcp`) so the API keys page shows the right URL in its copy-paste command.
 
 **stdio** (local, launched by the client, no key; acts as `PHOTON_MCP_USER`, a username or email, which can go in `.env`):
 

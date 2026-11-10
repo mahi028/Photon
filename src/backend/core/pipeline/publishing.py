@@ -90,6 +90,12 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "",
         raise PublishError("Pipeline is invalid; fix it before publishing.", 400,
                            [i.to_dict() for i in issues])
 
+    from . import saved
+    try:
+        model_ids = saved.check_publishable(user_id, graph)      # D-044
+    except saved.AssetError as e:
+        raise PublishError(str(e))
+
     snapshot: dict[str, dict] = {}
     for cid in _used_custom_ids(graph):
         cn = own_customs[cid]                    # validate() guarantees presence
@@ -116,6 +122,7 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "",
         published_id = uuid.uuid4().hex
 
     from . import library
+    store.mark_models_published(model_ids)
     version = store.add_published_version(
         published_id, user_id, pipeline_id, title, description, graph, snapshot,
         (changelog or "").strip()[:MAX_CHANGELOG], datetime.utcnow().isoformat(),

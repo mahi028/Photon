@@ -13,12 +13,21 @@ apply it, on one of two sample layouts:
           entries. Results are (N,) or (N, K) arrays; map_labels paints
           per-object results back onto a label image.
 
-Models live only for the run: fitted on this image, applied in the same
-graph. Saving a model across runs would mean unpickling user-produced
-objects, which the sandbox forbids on purpose; that waits for a safe format.
+Models normally live only for the run. To keep one (D-044), ml_save_model
+writes it as a skops file (a format that refuses to load unknown types, unlike
+pickle); after the run the backend registers it as a saved model, and
+ml_load_model brings it back in any later graph, published ones included.
+load_labels reads a label image painted in the UI, for y.
+
+The parent stages those files into the run's scratch dir before the child
+starts and sets RUNTIME["assets"] (D-044); the child never sees the store.
 """
 
 from __future__ import annotations
+
+import re
+import uuid
+from pathlib import Path
 
 import numpy as np
 
@@ -26,6 +35,52 @@ from ..registry import Param, Port, register
 from ..types import PortType
 
 _A, _M = PortType.ARRAY, PortType.MODEL
+
+# Set by the pipeline child (executor._CHILD): staged files ({"model:<id>":
+# path, "labels:<id>": path}), where ml_save_model writes, and what it wrote.
+RUNTIME: dict = {"assets": {}, "save_dir": None, "saved": []}
+MAX_MODEL_BYTES = 256 << 20
+
+# Internal types skops doesn't trust by default but our estimators contain.
+# Anything else in a file is refused (D-044).
+_SKOPS_TRUSTED = {
+    "sklearn.tree._tree.Tree",
+    "sklearn.ensemble._hist_gradient_boosting.predictor.TreePredictor",
+    "sklearn.neighbors._kd_tree.KDTree",
+    "sklearn.neighbors._ball_tree.BallTree",
+}
+_SKOPS_TRUSTED_RE = re.compile(r"^sklearn\.metrics\._dist_metrics\.\w+(32|64)$")
+
+
+def _allowed_class(model) -> bool:
+    from ..library import ESTIMATORS
+    import importlib
+    for name in ESTIMATORS:
+        mod, cls = name.rsplit(".", 1)
+        try:
+            if type(model) is getattr(importlib.import_module(mod), cls):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def dumps_model(model) -> bytes:
+    import skops.io as sio
+    return sio.dumps(model)
+
+
+def loads_model(data: bytes):
+    """skops load that accepts only the estimator classes Photon exposes."""
+    import skops.io as sio
+    untrusted = sio.get_untrusted_types(data=data)
+    bad = [t for t in untrusted if t not in _SKOPS_TRUSTED and not _SKOPS_TRUSTED_RE.match(t)]
+    if bad:
+        raise ValueError(f"saved model contains types Photon won't load: {bad}")
+    model = sio.loads(data, trusted=untrusted)
+    if not _allowed_class(model):
+        raise ValueError(f"saved model is a {type(model).__name__}, not a Photon model node class")
+    return model
 _SAMPLES = Param("samples", "choice", "pixels", choices=["pixels", "rows"],
                  doc="pixels: each pixel of an (H,W) or (H,W,C) image is a sample. "
                      "rows: each row of an (N,C) table, or of a dict of columns, is a sample.")
@@ -210,3 +265,82 @@ def map_labels(label_image, values, labels=None, background=0.0):
     mapped = np.array([lut.get(u, background) if u != 0 else background for u in uniq.tolist()])
     out = mapped[inv].reshape(lab.shape)
     return {"image": out}
+
+
+def _is_fitted(model) -> bool:
+    from sklearn.utils.validation import check_is_fitted
+    try:
+        check_is_fitted(model)
+        return True
+    except Exception:
+        return False
+
+
+@register(
+    name="ml_save_model", category="ml",
+    inputs=[Port("model", _M)],
+    outputs=[Port("model", _M)],
+    params=[Param("name", "str", None, required=True,
+                  doc="Name it is saved under. Each run saves a new copy (see Saved models).")],
+    doc="Keep a fitted model after the run. It appears under Saved models; load it in any "
+        "pipeline with ml_load_model to apply it to other images.",
+)
+def ml_save_model(model, name=None):
+    _check_model(model)
+    if not _is_fitted(model):
+        raise ValueError("model is not fitted: connect the model output of ml_fit or ml_fit_predict")
+    if not _allowed_class(model):
+        raise ValueError(f"{type(model).__name__} can't be saved")
+    name = str(name or "").strip()[:80]
+    if not name:
+        raise ValueError("name is required")
+    try:
+        data = dumps_model(model)
+    except Exception as e:
+        raise ValueError(f"{type(model).__name__} can't be saved in the safe format: {e}") from None
+    if len(data) > MAX_MODEL_BYTES:
+        raise ValueError(f"model is {len(data) >> 20} MB; the limit is {MAX_MODEL_BYTES >> 20} MB "
+                         "(fewer trees or max_depth makes it smaller)")
+    if RUNTIME["save_dir"] is None:
+        raise RuntimeError("saving models is only possible inside a pipeline run")
+    d = Path(RUNTIME["save_dir"])
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{uuid.uuid4().hex}.skops"
+    path.write_bytes(data)
+    RUNTIME["saved"].append({"name": name, "path": str(path), "estimator": type(model).__name__,
+                             "summary": repr(model)[:300]})
+    return {"model": model}
+
+
+@register(
+    name="ml_load_model", category="ml",
+    inputs=[],
+    outputs=[Port("model", _M)],
+    params=[Param("model_id", "str", None, required=True,
+                  doc="A saved model (see Saved models, or list_models over MCP).")],
+    doc="A fitted model saved by an earlier run (ml_save_model). Connect it to ml_predict.",
+)
+def ml_load_model(model_id=None):
+    path = RUNTIME["assets"].get(f"model:{model_id}")
+    if not path:
+        raise ValueError(f"saved model {model_id!r} was not found or is not yours")
+    return {"model": loads_model(Path(path).read_bytes())}
+
+
+@register(
+    name="load_labels", category="ml",
+    inputs=[],
+    outputs=[Port("labels", _A)],
+    params=[Param("annotation_id", "str", "",
+                  doc="A label image painted in the session view. Empty: the most recent one "
+                      "painted on the image being processed.")],
+    doc="Labels painted over the input image in the UI (0 = unlabeled, 1..N = classes), as an "
+        "(H, W) int array: y for ml_fit / ml_fit_predict with ignore_label=0.",
+)
+def load_labels(annotation_id=""):
+    path = RUNTIME["assets"].get(f"labels:{annotation_id or ''}")
+    if not path:
+        raise ValueError("no painted labels for this image" if not annotation_id
+                         else f"annotation {annotation_id!r} was not found or is not yours")
+    from PIL import Image
+    return {"labels": np.asarray(Image.open(path)).astype(np.int32)}

@@ -12,7 +12,11 @@
             <span class="text-xs text-gray-500 uppercase tracking-wide">
               Original <span x-show="sess.images.length > 1" x-text="`#${slotIdx+1}`"></span>
             </span>
-            <span class="text-xs text-gray-600 truncate max-w-[150px]" x-text="img.metadata.original_filename" :title="img.metadata.original_filename"></span>
+            <span class="flex items-center gap-2 min-w-0">
+              <button @click="$store.labelPainter.open(img)" class="text-[11px] text-gray-400 hover:text-indigo-400 shrink-0"
+                      title="Paint training labels on this image (read by the load_labels node)">✎ Labels</button>
+              <span class="text-xs text-gray-600 truncate max-w-[150px]" x-text="img.metadata.original_filename" :title="img.metadata.original_filename"></span>
+            </span>
           </div>
           <div class="flex-1 bg-gray-900 rounded-xl border border-gray-800 overflow-hidden flex items-center justify-center relative group">
             <template x-if="originalUrl">

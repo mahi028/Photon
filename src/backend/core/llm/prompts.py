@@ -119,7 +119,10 @@ def build_system_prompt(metadata: ImageMetadata,
           results back onto the label image. Examples: k-means colour clusters =
           KMeans -> ml_fit_predict(X=input image); pixel classifier =
           multiscale_basic_features -> ml_fit_predict(model=RandomForestClassifier,
-          y=coarse labels, ignore_label=0). Models exist only within one run.
+          y=coarse labels, ignore_label=0). `load_labels` gives the labels the
+          user painted on the image (0 = unlabeled): use it as y with
+          ignore_label=0. To keep a fitted model, end with `ml_save_model(name=...)`;
+          later graphs apply it with `ml_load_model(model_id=...)` -> `ml_predict`.
         - Non-image outputs (numbers, threshold arrays, tables) are reported back
           to you after the run.
         - Prefer catalog ops when one fits. If unsure of a library node's port or

@@ -41,6 +41,12 @@ from PIL import Image  # noqa: E402
 # down before any custom node code is compiled or run (D-036).
 _INPUT = np.asarray(Image.open(JOB["input_path"]).convert(JOB["input_mode"]))
 import src.backend.core.models.sidecar  # noqa: E402,F401  (model ops import it lazily)
+from src.backend.core.pipeline.ops import ml as _ml  # noqa: E402
+_ml.RUNTIME["assets"] = JOB.get("assets") or {}       # staged saved models / labels (D-044)
+_ml.RUNTIME["save_dir"] = str(Path(JOB["output_dir"]) / "models")
+if any(n.get("op") in ("ml_save_model", "ml_load_model") for n in JOB["graph"].get("nodes") or []):
+    import skops.io  # noqa: E402,F401  (loads native libs via ctypes, which the guard blocks)
+    import sklearn.utils.validation  # noqa: E402,F401
 guard.install(read_roots=guard.default_read_roots() + JOB["read_roots"],
               write_roots=JOB["write_roots"], unix_sockets=JOB["unix_sockets"])
 
@@ -151,6 +157,7 @@ def main():
         "previews": previews,
         "finals": finals,
         "values": values,
+        "saved_models": _ml.RUNTIME["saved"],
     }, open(JOB["result_path"], "w"))
 
 try:
@@ -182,9 +189,14 @@ def run_pipeline_subprocess(
     custom_nodes: dict[str, dict] | None = None,
     timeout: Optional[int] = None,
     input_mode: str = "RGB",
+    assets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute a graph out-of-process. Returns the child's result manifest
-    plus wall-clock timing, or a synthetic error dict on timeout/crash."""
+    plus wall-clock timing, or a synthetic error dict on timeout/crash.
+
+    assets: {"model:<id>" | "labels:<id>": file} — saved models and painted
+    labels the graph loads (D-044). Copied into the run's scratch dir, the
+    only place the guarded child can read them from."""
     timeout = timeout or config.EXECUTION_TIMEOUT_SECONDS * 4  # pipelines are multi-op
     repo_root = str(config.ROOT_DIR)
 
@@ -205,8 +217,19 @@ def run_pipeline_subprocess(
         unix_sockets.append(str(config.MODEL_SIDECAR_SOCKET))
         config.MODEL_IPC_DIR.mkdir(parents=True, exist_ok=True)
 
+    staged: dict[str, str] = {}
+    if assets:
+        import shutil
+        adir = scratch / "assets"
+        adir.mkdir()
+        for i, (key, src) in enumerate(sorted(assets.items())):
+            dst = adir / f"{i}{Path(src).suffix}"
+            shutil.copyfile(src, dst)
+            staged[key] = str(dst)
+
     job = {
         "repo_root": repo_root,
+        "assets": staged,
         "graph": graph,
         "custom_nodes": custom_nodes or {},
         "input_path": input_path,

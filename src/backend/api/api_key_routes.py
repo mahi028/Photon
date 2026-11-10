@@ -25,7 +25,8 @@ def list_keys():
 @api_key_bp.route("/keys", methods=["POST"])
 @login_required
 def create_key():
-    """Body: {name, expires_in_days: null|7|30|90|365}. The response is the only
+    """Body: {name, expires_in_days: null|7|30|90|365, scope: read|run|write
+    (default write)}. The response is the only
     time the plaintext key is ever returned."""
     # Strict JSON (no force=True): a cross-site form post can't produce
     # application/json without a CORS preflight.
@@ -38,7 +39,10 @@ def create_key():
     expires = data.get("expires_in_days")
     if expires not in _ALLOWED_EXPIRY_DAYS:
         return jsonify({"error": "expires_in_days must be null, 7, 30, 90 or 365"}), 400
-    return jsonify(api_keys.create_key(get_current_user_id(), name, expires)), 201
+    scope = data.get("scope", "write")
+    if scope not in api_keys.SCOPES:
+        return jsonify({"error": "scope must be read, run or write"}), 400
+    return jsonify(api_keys.create_key(get_current_user_id(), name, expires, scope)), 201
 
 
 @api_key_bp.route("/keys/<key_id>", methods=["DELETE"])

@@ -39,12 +39,14 @@ def get_executor() -> Executor:
 
 def run_pipeline(graph: dict, input_path: str, output_dir: str, node_preview_dir: str,
                  custom_nodes: dict | None = None, timeout: Optional[int] = None,
-                 input_mode: str = "RGB") -> dict[str, Any]:
+                 input_mode: str = "RGB", assets: dict[str, str] | None = None) -> dict[str, Any]:
     """Run a pipeline graph against one image (see executor.run_pipeline_subprocess)."""
     if mode() == "remote":
         from .remote import run_pipeline_remote
         return run_pipeline_remote(graph, input_path, output_dir, node_preview_dir,
-                                   custom_nodes=custom_nodes, timeout=timeout, input_mode=input_mode)
+                                   custom_nodes=custom_nodes, timeout=timeout, input_mode=input_mode,
+                                   assets=assets)
     from ..pipeline.executor import run_pipeline_subprocess
     return run_pipeline_subprocess(graph, input_path, output_dir, node_preview_dir,
-                                   custom_nodes=custom_nodes, timeout=timeout, input_mode=input_mode)
+                                   custom_nodes=custom_nodes, timeout=timeout, input_mode=input_mode,
+                                   assets=assets)

@@ -209,7 +209,33 @@
                          @input="setParam(p.name, $event.target.value, p.kind)"
                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60" />
                 </template>
-                <template x-if="p.kind === 'str' || p.kind === 'json'">
+                <template x-if="assetParam(p) === 'model'">
+                  <div>
+                    <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
+                            @change="setParam(p.name, $event.target.value, 'str')"
+                            class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                      <option value="">(pick a saved model)</option>
+                      <template x-if="paramValue(p.name) && !savedModels.find(m => m.model_id === paramValue(p.name))">
+                        <option :value="paramValue(p.name)" x-text="`${String(paramValue(p.name)).slice(0, 8)}… (not in your list)`"></option>
+                      </template>
+                      <template x-for="m in savedModels" :key="m.model_id">
+                        <option :value="m.model_id" x-text="`${m.name} · ${m.estimator} · ${m.created_at.slice(0, 16).replace('T', ' ')}`"></option>
+                      </template>
+                    </select>
+                    <p x-show="!savedModels.length" class="text-[10px] text-gray-600 mt-0.5">No saved models yet: end a training graph with ml_save_model and run it.</p>
+                  </div>
+                </template>
+                <template x-if="assetParam(p) === 'labels'">
+                  <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
+                          @change="setParam(p.name, $event.target.value, 'str')"
+                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                    <option value="">latest labels painted on the input image</option>
+                    <template x-for="a in savedLabels" :key="a.annotation_id">
+                      <option :value="a.annotation_id" x-text="`${a.name} · ${a.width}×${a.height} · image ${a.image_id.slice(0, 8)}`"></option>
+                    </template>
+                  </select>
+                </template>
+                <template x-if="(p.kind === 'str' || p.kind === 'json') && !assetParam(p)">
                   <input type="text" :value="paramText(p)" :disabled="isPreset"
                          :placeholder="paramPlaceholder(p)"
                          @change="setParam(p.name, $event.target.value, p.kind)"

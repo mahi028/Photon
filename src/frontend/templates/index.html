@@ -130,6 +130,9 @@
   <!-- Share Link Dialog -->
   {% include "partials/share_dialog.html" %}
 
+  <!-- Label painter (D-044) -->
+  {% include "partials/label_painter.html" %}
+
   <!-- Carousel Modal -->
   <div x-show="carouselOpen" @click.self="closeCarousel()" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" x-transition style="display:none;">
 
@@ -205,6 +208,7 @@
 <script src="{{ url_for('static', filename='js/downloadDialog.js') }}"></script>
 <script src="{{ url_for('static', filename='js/codeDialog.js') }}"></script>
 <script src="{{ url_for('static', filename='js/shareDialog.js') }}"></script>
+<script src="{{ url_for('static', filename='js/labelPainter.js') }}"></script>
 
 <script>
 // Root Alpine component
@@ -370,6 +374,15 @@ document.addEventListener('alpine:init', () => {
     close() {
       this.isOpen = false;
     }
+  });
+
+  Alpine.store('labelPainter', {
+    isOpen: false,
+    open(image) {
+      this.isOpen = true;
+      window.dispatchEvent(new CustomEvent('fe:labels-opened', { detail: image }));
+    },
+    close() { this.isOpen = false; }
   });
 
   Alpine.store('downloadDialog', {

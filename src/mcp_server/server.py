@@ -24,6 +24,8 @@ SQLite on every call (see SessionManager.invalidate) so UI-side edits are seen.
 from __future__ import annotations
 
 import base64
+import functools
+import inspect
 import binascii
 import io
 import mimetypes
@@ -84,6 +86,8 @@ INSTRUCTIONS = (
         "'input' is the implicit source node; ['input','image'] is the session image. "
         "Beyond the curated ops, ~600 library functions (skimage, scipy.ndimage, OpenCV) are nodes "
         "named 'lib:<module>.<function>': find them with list_ops(query=...), inspect with describe_op. "
+        "scikit-learn models are nodes too: fit with ml_fit, keep with ml_save_model, reuse via "
+        "ml_load_model (list_models); load_labels reads labels painted in the UI or sent with save_labels. "
         "Port names and types come from list_ops and must match exactly. IMAGE_RGB does "
         "not auto-convert to IMAGE_GRAY: insert to_grayscale. MASK/FLOAT_MAP auto-convert "
         "to grayscale. Always validate_pipeline before run_pipeline."
@@ -96,9 +100,35 @@ _TOOLS: list[tuple[Any, dict]] = []
 _RO = ToolAnnotations(read_only_hint=True)   # lets clients auto-approve
 
 
-def _tool(**opts):
+def _check_scope(fn_name: str, needed: str) -> None:
+    """HTTP keys carry a scope (read < run < write, D-043); stdio is the local
+    user and has full access."""
+    tok = get_access_token()
+    if tok is None:
+        return
+    have = tok.scopes[0] if tok.scopes else None
+    if not api_keys.allows(have, needed):
+        raise ToolError(f"{fn_name} needs a '{needed}' API key; this key is '{have}'. "
+                        "Create a key with more access at /settings/api-keys.")
+
+
+def _tool(scope: str = "read", **opts):
+    """Register a tool that needs API-key scope `scope`."""
+    assert scope in api_keys.SCOPES
+
     def deco(fn):
-        _TOOLS.append((fn, opts))
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def wrapped(*a, **kw):
+                _check_scope(fn.__name__, scope)
+                return await fn(*a, **kw)
+        else:
+            @functools.wraps(fn)
+            def wrapped(*a, **kw):
+                _check_scope(fn.__name__, scope)
+                return fn(*a, **kw)
+        wrapped.scope = scope
+        _TOOLS.append((wrapped, opts))
         return fn
     return deco
 
@@ -218,7 +248,7 @@ def _read_local(path: str) -> tuple[bytes, str]:
     return p.read_bytes(), p.name
 
 
-@_tool(structured_output=False)
+@_tool(scope="run", structured_output=False)
 def upload_image(path: str | None = None, url: str | None = None,
                  data_base64: str | None = None, filename: str | None = None,
                  session_id: str | None = None) -> list:
@@ -277,7 +307,7 @@ def _meta_public(meta) -> dict:
     return d
 
 
-@_tool()
+@_tool(scope="run")
 def create_session(title: str = "MCP session", image_ids: list[str] | None = None) -> dict:
     """Create a Photon session (visible in the web UI) with optional uploaded images.
 
@@ -291,7 +321,7 @@ def create_session(title: str = "MCP session", image_ids: list[str] | None = Non
     return {"session_id": sess.session_id, "title": sess.title, "image_ids": sess.image_ids}
 
 
-@_tool()
+@_tool(scope="run")
 def attach_image(session_id: str, image_id: str) -> dict:
     """Attach an already-uploaded image to a session."""
     _session(session_id)
@@ -301,13 +331,13 @@ def attach_image(session_id: str, image_id: str) -> dict:
     return {"session_id": session_id, "image_ids": sess.image_ids}
 
 
-@_tool(annotations=_RO)
+@_tool(scope="read", annotations=_RO)
 def list_sessions() -> list[dict]:
     """List this user's sessions, most recently updated first."""
     return get_manager().list_sessions(_uid())
 
 
-@_tool(annotations=_RO)
+@_tool(scope="read", annotations=_RO)
 def get_session(session_id: str) -> dict:
     """Session details: attached images (with metadata) and produced outputs."""
     sess = _session(session_id)
@@ -321,7 +351,7 @@ def get_session(session_id: str) -> dict:
             "images": images, "outputs": outputs}
 
 
-@_tool(structured_output=False, annotations=_RO)
+@_tool(scope="read", structured_output=False, annotations=_RO)
 def get_output(session_id: str, output_id: str) -> list:
     """Fetch one output: full-res file path, the graph/code that produced it, and a preview."""
     sess = _session(session_id)
@@ -333,7 +363,7 @@ def get_output(session_id: str, output_id: str) -> list:
     return [info, *filter(None, [_preview(out.preview_path or out.path)])]
 
 
-@_tool(structured_output=False, annotations=_RO)
+@_tool(scope="read", structured_output=False, annotations=_RO)
 def download_output(session_id: str, output_id: str) -> list:
     """Full-resolution output file as an embedded resource (base64 blob), for
     clients that can't read the server's disk. get_output's preview is a
@@ -357,7 +387,7 @@ def download_output(session_id: str, output_id: str) -> list:
             EmbeddedResource(type="resource", resource=blob)]
 
 
-@_tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+@_tool(scope="run", annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
 def detach_image(session_id: str, image_id: str) -> dict:
     """Detach an image from a session. The uploaded image itself is kept (other
     sessions may use it); future runs just skip it."""
@@ -368,7 +398,7 @@ def detach_image(session_id: str, image_id: str) -> dict:
     return {"session_id": session_id, "image_ids": sess.image_ids}
 
 
-@_tool(annotations=ToolAnnotations(destructive_hint=True))
+@_tool(scope="write", annotations=ToolAnnotations(destructive_hint=True))
 def delete_session(session_id: str, confirm_title: str) -> dict:
     """Permanently delete a session: its outputs, history, share links, and any
     source image no other session uses. Irreversible. confirm_title must equal
@@ -391,7 +421,7 @@ def delete_session(session_id: str, confirm_title: str) -> dict:
 # Ops & pipelines
 # ---------------------------------------------------------------------------
 
-@_tool(annotations=_RO)
+@_tool(scope="read", annotations=_RO)
 def list_ops(category: str | None = None, query: str | None = None) -> dict:
     """Op catalog: every curated op's typed input/output ports and params, the
     port types, the implicit coercion table, and this user's saved custom
@@ -421,7 +451,7 @@ def list_ops(category: str | None = None, query: str | None = None) -> dict:
     return cat
 
 
-@_tool(annotations=_RO)
+@_tool(scope="read", annotations=_RO)
 def describe_op(name: str) -> dict:
     """Full spec of one op: a catalog op ("otsu_threshold") or a library function
     ("lib:skimage.segmentation.watershed", "lib:cv2.GaussianBlur"): input/output
@@ -433,7 +463,7 @@ def describe_op(name: str) -> dict:
     return spec.to_dict()
 
 
-@_tool(annotations=_RO)
+@_tool(scope="read", annotations=_RO)
 def validate_pipeline(graph: dict) -> dict:
     """Statically check a pipeline graph (unknown ops, port names/types, cycles,
     params, unconnected inputs). Returns {valid, issues[]}. Nothing runs."""
@@ -476,11 +506,12 @@ def _summarize(session_id: str, result: dict, errors: list) -> list:
                "run_id": result.get("run_id"), "outputs": outputs,
                # non-image outputs per image slot: {slot: {node: {port: value}}}
                "values": {str(k): v for k, v in values.items()} or None,
+               "saved_models": result.get("saved_models") or None,
                "errors": errors or ([{"message": result["error"]}] if result.get("error") else None)}
     return [summary, *content]
 
 
-@_tool(structured_output=False)
+@_tool(scope="run", structured_output=False)
 async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
                        pipeline_id: str | None = None, published_id: str | None = None,
                        version: int | None = None, title: str = "mcp", wait: bool = True) -> list:
@@ -560,7 +591,7 @@ async def run_pipeline(session_id: str, ctx: Context, graph: dict | None = None,
              "hint": "Poll get_run(job_id) until status is 'done'."}]
 
 
-@_tool(structured_output=False, annotations=_RO)
+@_tool(scope="read", structured_output=False, annotations=_RO)
 def get_run(job_id: str) -> list:
     """Status of a run started with run_pipeline(wait=False). While running:
     {status: "running", done, total}. When finished: status "done" plus the
@@ -580,7 +611,7 @@ def get_run(job_id: str) -> list:
     return [{**head, **summary}, *content]
 
 
-@_tool(annotations=_RO)
+@_tool(scope="read", annotations=_RO)
 def list_pipelines(scope: str = "all", query: str | None = None) -> dict:
     """Pipelines you can run.
 
@@ -610,7 +641,7 @@ def list_pipelines(scope: str = "all", query: str | None = None) -> dict:
     return out
 
 
-@_tool(annotations=_RO)
+@_tool(scope="read", annotations=_RO)
 def get_pipeline(pipeline_id: str | None = None, published_id: str | None = None,
                  version: int | None = None) -> dict:
     """Full pipeline including its graph. Give pipeline_id (your library or a
@@ -629,7 +660,7 @@ def get_pipeline(pipeline_id: str | None = None, published_id: str | None = None
     return d
 
 
-@_tool()
+@_tool(scope="write")
 def publish_pipeline(pipeline_id: str, changelog: str = "", thumbnail: bool = True) -> dict:
     """Publish one of your saved pipelines to everyone on this Photon instance
     as its next immutable version (graph + the code of every custom node it
@@ -645,7 +676,7 @@ def publish_pipeline(pipeline_id: str, changelog: str = "", thumbnail: bool = Tr
         raise ToolError(str(e))
 
 
-@_tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+@_tool(scope="write", annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
 def unpublish_pipeline(published_id: str) -> dict:
     """Hide one of your publications from others (versions are kept; publishing
     the source pipeline again restores it)."""
@@ -654,7 +685,7 @@ def unpublish_pipeline(published_id: str) -> dict:
     return {"unpublished": True, "published_id": published_id}
 
 
-@_tool()
+@_tool(scope="write")
 def fork_pipeline(published_id: str, version: int | None = None,
                   title: str | None = None) -> dict:
     """Copy a published version into your library as an editable pipeline. Its
@@ -666,7 +697,7 @@ def fork_pipeline(published_id: str, version: int | None = None,
         raise ToolError(str(e))
 
 
-@_tool()
+@_tool(scope="write")
 def save_pipeline(title: str, graph: dict, description: str = "") -> dict:
     """Save a (valid) graph as a new pipeline in the user's library — it then
     appears in the web UI's pipeline editor."""
@@ -678,6 +709,43 @@ def save_pipeline(title: str, graph: dict, description: str = "") -> dict:
     store.save_pipeline(pid, _uid(), title.strip() or "Untitled pipeline",
                         description.strip(), graph, now, now)
     return {"saved": True, "pipeline_id": pid}
+
+
+@_tool(scope="read", annotations=_RO)
+def list_models() -> dict:
+    """Your saved models (fitted by a run that ended in ml_save_model). Apply one in a
+    graph with ml_load_model(model_id=...) -> ml_predict."""
+    from src.backend.core.pipeline import saved
+    return {"models": saved.list_models(_uid())}
+
+
+@_tool(scope="read", annotations=_RO)
+def list_labels(image_id: str | None = None) -> dict:
+    """Label images painted in the UI (or sent with save_labels), optionally for one image.
+    A graph reads one with load_labels (empty annotation_id = latest for the input image)."""
+    return {"annotations": store.list_annotations(_uid(), image_id)}
+
+
+@_tool(scope="run")
+def save_labels(image_id: str, data_base64: str, name: str = "labels",
+                annotation_id: str | None = None) -> dict:
+    """Store a label image for an image: a PNG (base64), same size as the image, mode L,
+    0 = unlabeled and 1..16 = classes. Training graphs read it with load_labels and
+    ml_fit(ignore_label=0). Pass annotation_id to replace an existing one."""
+    from src.backend.core.pipeline import saved
+    meta = _image_meta(image_id)
+    if meta is None:
+        raise ToolError(f"Image {image_id} not found.")
+    try:
+        png = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        raise ToolError("data_base64 is not valid base64.")
+    try:
+        row = saved.save_annotation(_uid(), image_id, png, (meta.shape[1], meta.shape[0]),
+                                    name=name, annotation_id=annotation_id)
+    except saved.AssetError as e:
+        raise ToolError(str(e))
+    return row
 
 
 class ApiKeyVerifier:
@@ -692,7 +760,7 @@ class ApiKeyVerifier:
             exp = int(datetime.fromisoformat(row["expires_at"]).timestamp())
         # subject = Photon user_id; client_id = key_id (one MCP principal per key).
         return AccessToken(token=token, client_id=row["key_id"], subject=row["user_id"],
-                           scopes=[], expires_at=exp)
+                           scopes=[row.get("scope") or "write"], expires_at=exp)
 
 
 def build_server(*, http_auth_url: str | None = None) -> MCPServer:
