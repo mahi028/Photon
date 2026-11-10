@@ -299,7 +299,8 @@ def _run_item(batch_id: str, idx: int, image_id: str) -> None:
     result = sandbox_backend.run_pipeline(
         ctx["graph"], meta.path, str(out_dir), str(node_dir), custom_nodes=ctx["customs"],
         input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets, export_tables=True)
-    shutil.rmtree(node_dir, ignore_errors=True)  # node previews aren't kept for batches
+    preview = _main_preview(result, out_dir)
+    shutil.rmtree(node_dir, ignore_errors=True)  # other node previews aren't kept
     if ctx["outer"]:
         subgraph.collapse(result, ctx["outer"])
     saved.register_saved(ctx["user_id"], result.get("saved_models") or [], None, ctx["title"])
@@ -322,7 +323,39 @@ def _run_item(batch_id: str, idx: int, image_id: str) -> None:
     store.update_batch_item(batch_id, idx, status="failed" if result.get("error") else "done",
                             error=(result.get("error") or None) and str(result["error"])[-2000:],
                             seconds=round(time.time() - t0, 2), values=result.get("values") or {},
-                            outputs=outputs, tables=tables)
+                            outputs=outputs, tables=tables,
+                            preview={"node_id": preview[0], "path": preview[1].relative_to(base).as_posix()}
+                            if preview else None)
+
+
+def _main_preview(result: dict, out_dir: Path) -> Optional[tuple[str, Path]]:
+    """(node, 256-px thumbnail) of the last node, in run order, that made an
+    image. Shown when every image a graph makes feeds another node (e.g. labels
+    -> regionprops), so there is no final output to show, and on failures."""
+    previews = result.get("previews") or {}
+    done = [e["node_id"] for e in result.get("events") or [] if e.get("phase") == "done"]
+    for nid in reversed(done):
+        info = previews.get(nid)
+        if not info or not Path(info["path"]).is_file():
+            continue
+        dst = out_dir / "main_preview.jpg"
+        try:
+            generate_thumbnail(Path(info["path"]), dst, max_long_edge=256)
+            return nid, dst
+        except Exception:
+            return None
+    return None
+
+
+def _input_preview_url(image_id: str) -> Optional[str]:
+    meta = _image_meta(image_id)
+    if not meta or not meta.preview_path:
+        return None
+    try:
+        rel = Path(meta.preview_path).relative_to(config.UPLOADS_DIR)
+    except ValueError:
+        return None
+    return f"/previews/uploads/{rel.as_posix()}"
 
 
 def _finish_if_done(batch_id: str) -> None:
@@ -423,6 +456,8 @@ def get(user_id: str, batch_id: str, with_items: bool = True) -> dict:
     out = public(b)
     if with_items:
         items = store.list_batch_items(batch_id)
+        for it in items:
+            it["input_preview"] = _input_preview_url(it["image_id"])
         out["items"] = items
         out["columns"] = value_columns(items)
         out["tables"] = table_keys(items)
@@ -438,6 +473,9 @@ def _flat(v: Any) -> Any:
 
 
 def value_columns(items: list[dict]) -> list[str]:
+    """node.port columns for the per-image values table. Values exported as
+    tables (per-object rows) are left out: they have their own CSV."""
+    tabled = {f"{t['node_id']}.{t['port']}" for it in items for t in it.get("tables") or []}
     cols: list[str] = []
     for it in items:
         for nid, ports in (it.get("values") or {}).items():
@@ -445,7 +483,7 @@ def value_columns(items: list[dict]) -> list[str]:
                 continue                     # inner nodes of a pipeline node: reported on it
             for port in ports:
                 key = f"{nid}.{port}"
-                if key not in cols:
+                if key not in cols and key not in tabled:
                     cols.append(key)
     return cols
 

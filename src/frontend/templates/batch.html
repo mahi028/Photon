@@ -3,7 +3,7 @@
 {% block title %}Batch — Photon{% endblock %}
 
 {% block content %}
-<div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden" x-data="batchPage({{ batch_id|tojson }})">
+<div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden" x-data='batchPage({{ batch_id|tojson }})'>
 
   <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
     <div class="flex items-center gap-3 min-w-0">
@@ -62,7 +62,8 @@
               <thead class="bg-gray-900 text-gray-400">
                 <tr>
                   <th class="px-2 py-2 text-left font-medium">#</th>
-                  <th class="px-2 py-2 text-left font-medium">Output</th>
+                  <th class="px-2 py-2 text-left font-medium">Input</th>
+                  <th class="px-2 py-2 text-left font-medium">Result</th>
                   <th class="px-2 py-2 text-left font-medium">Image</th>
                   <th class="px-2 py-2 text-left font-medium">Status</th>
                   <th class="px-2 py-2 text-right font-medium">s</th>
@@ -76,10 +77,18 @@
                   <tr class="hover:bg-gray-900/60 align-top">
                     <td class="px-2 py-1.5 text-gray-500 tabular-nums" x-text="it.idx + 1"></td>
                     <td class="px-2 py-1.5">
-                      <template x-if="it.outputs && it.outputs.length && it.outputs[0].preview">
-                        <a :href="`/api/batches/${id}/files/${it.outputs[0].path}`" target="_blank">
-                          <img :src="`/api/batches/${id}/files/${it.outputs[0].preview}`" class="w-14 h-10 object-cover rounded border border-gray-700" loading="lazy" />
-                        </a>
+                      <template x-if="it.input_preview">
+                        <img :src="it.input_preview" @click="zoom = {src: it.input_preview, title: it.filename}"
+                             class="w-16 h-12 object-contain bg-gray-900 rounded border border-gray-700 cursor-zoom-in" loading="lazy" />
+                      </template>
+                    </td>
+                    <td class="px-2 py-1.5">
+                      <template x-if="resultThumb(it)">
+                        <div class="flex flex-col items-start gap-0.5">
+                          <img :src="resultThumb(it).src" @click="zoom = {src: resultThumb(it).full, title: `${it.filename} · ${resultThumb(it).label}`}"
+                               class="w-16 h-12 object-contain bg-gray-900 rounded border border-gray-700 cursor-zoom-in" loading="lazy" />
+                          <span class="text-[9px] text-gray-600 font-mono max-w-[64px] truncate" :title="resultThumb(it).label" x-text="resultThumb(it).label"></span>
+                        </div>
                       </template>
                     </td>
                     <td class="px-2 py-1.5 text-gray-200 max-w-[180px] truncate" :title="it.filename" x-text="it.filename"></td>
@@ -104,6 +113,13 @@
       </div>
     </template>
   </main>
+
+  <!-- zoom -->
+  <div x-show="zoom" @click="zoom = null" @keydown.escape.window="zoom = null"
+       class="fixed inset-0 z-50 bg-black/85 flex flex-col items-center justify-center p-4 cursor-zoom-out" style="display:none;">
+    <img :src="zoom && zoom.src" class="max-w-full max-h-[88vh] object-contain rounded" />
+    <p class="text-xs text-gray-400 mt-2" x-text="zoom && zoom.title"></p>
+  </div>
 </div>
 {% endblock %}
 
@@ -111,7 +127,19 @@
 <script>
 function batchPage(id) {
   return {
-    id, b: null, error: '', filter: '', limit: 200, timer: null,
+    id, b: null, error: '', filter: '', limit: 200, timer: null, zoom: null,
+
+    // A final output if the graph has one, else the last image a node made.
+    resultThumb(it) {
+      const o = (it.outputs || []).find(o => o.preview);
+      if (o) return {src: `/api/batches/${this.id}/files/${o.preview}`,
+                     full: `/api/batches/${this.id}/files/${o.path}`, label: `${o.node_id}.${o.port}`};
+      if (it.preview) {
+        const u = `/api/batches/${this.id}/files/${it.preview.path}`;
+        return {src: u, full: u, label: `${it.preview.node_id} (intermediate)`};
+      }
+      return null;
+    },
 
     get active() { return this.b && ['queued', 'running'].includes(this.b.status); },
     get filtered() { return (this.b.items || []).filter(it => !this.filter || it.status === this.filter); },

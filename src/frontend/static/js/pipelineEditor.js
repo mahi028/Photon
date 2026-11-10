@@ -111,6 +111,12 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
 
       this._initDrawflow();
       this._importGraph(this.pipeline.graph);
+      // Graphs from the chat / MCP / older saves have no positions: lay them
+      // out. Either way, start with the whole pipeline in view.
+      const nodes = this.pipeline.graph?.nodes || [];
+      await this.$nextTick();
+      if (nodes.length && nodes.some(n => !n.pos)) this.prettify({markDirty: false});
+      else this.fitView();
     },
 
     _initDrawflow() {
@@ -118,6 +124,17 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       this.editor = new Drawflow(container);
       this.editor.reroute = true;
       this.editor.start();
+
+      this.editor.zoom_min = 0.15;
+      this.editor.zoom_max = 2.5;
+      // Wheel zooms around the cursor. Drawflow's own handler (Ctrl+wheel,
+      // around the canvas centre) is skipped: this listener is on the wrapper,
+      // in the capture phase, and stops the event before it reaches it.
+      container.parentElement.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this._zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015)));
+      }, {passive: false, capture: true});
 
       this.editor.on('connectionCreated', (info) => this._onConnection(info));
       this.editor.on('nodeSelected', (id) => { this.selectedNodeId = id; });
@@ -701,7 +718,90 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
       es.onerror = () => { es.close(); this.running = false; };
     },
 
-    zoomIn() { this.editor && this.editor.zoom_in(); },
-    zoomOut() { this.editor && this.editor.zoom_out(); },
+    // --- layout ------------------------------------------------------------
+
+    _nodeSize(dfId) {
+      const el = document.getElementById(`node-${dfId}`);
+      return el ? {w: el.offsetWidth || 180, h: el.offsetHeight || 80} : {w: 180, h: 80};
+    },
+
+    // Arrange every node left to right in dependency order (graphLayout.js).
+    prettify({markDirty = true} = {}) {
+      if (!this.editor || typeof layoutGraph !== 'function') return;
+      const data = this.editor.drawflow.drawflow.Home.data;
+      const ids = Object.keys(data);
+      if (!ids.length) return;
+      const edges = [];
+      for (const [id, n] of Object.entries(data)) {
+        for (const out of Object.values(n.outputs || {})) {
+          for (const c of out.connections || []) edges.push([id, String(c.node)]);
+        }
+      }
+      const pos = layoutGraph(ids, edges, id => this._nodeSize(id), {gapX: 70, gapY: 28});
+      for (const id of ids) {
+        const p = pos[id];
+        data[id].pos_x = 40 + p.x;
+        data[id].pos_y = 40 + p.y;
+        const el = document.getElementById(`node-${id}`);
+        if (el) { el.style.left = `${data[id].pos_x}px`; el.style.top = `${data[id].pos_y}px`; }
+      }
+      for (const id of ids) this.editor.updateConnectionNodes(`node-${id}`);
+      if (markDirty && !this.isPreset) this.dirty = true;
+      this.fitView();
+    },
+
+    // Zoom and pan so every node is visible (Drawflow scales around the
+    // canvas centre: translate = (centre - bbox centre) * zoom).
+    fitView() {
+      if (!this.editor) return;
+      const data = this.editor.drawflow.drawflow.Home.data;
+      const ids = Object.keys(data);
+      if (!ids.length) return;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const id of ids) {
+        const {w, h} = this._nodeSize(id);
+        x0 = Math.min(x0, data[id].pos_x); y0 = Math.min(y0, data[id].pos_y);
+        x1 = Math.max(x1, data[id].pos_x + w); y1 = Math.max(y1, data[id].pos_y + h);
+      }
+      const box = this.$refs.canvas.getBoundingClientRect();
+      const pad = 60;
+      const z = Math.max(this.editor.zoom_min,
+                         Math.min(1.1, (box.width - pad) / (x1 - x0), (box.height - pad) / (y1 - y0)));
+      this._setView(z, (box.width / 2 - (x0 + x1) / 2) * z, (box.height / 2 - (y0 + y1) / 2) * z);
+    },
+
+    _setView(z, tx, ty) {
+      const ed = this.editor;
+      ed.zoom = z;
+      ed.zoom_last_value = z;
+      ed.canvas_x = tx;
+      ed.canvas_y = ty;
+      ed.precanvas.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
+      ed.dispatch('zoom', z);
+    },
+
+    // Zoom by `factor`, keeping the canvas point under (clientX, clientY) fixed.
+    // Drawflow scales around the canvas centre C: screen = C + (p - C)*z + t.
+    _zoomAt(clientX, clientY, factor) {
+      const ed = this.editor;
+      if (!ed) return;
+      const z = ed.zoom;
+      const z2 = Math.min(ed.zoom_max, Math.max(ed.zoom_min, z * factor));
+      if (z2 === z) return;
+      const r = this.$refs.canvas.getBoundingClientRect();
+      const cx = r.width / 2, cy = r.height / 2;
+      const mx = clientX - r.left, my = clientY - r.top;
+      const px = cx + (mx - cx - ed.canvas_x) / z;      // canvas point under the cursor
+      const py = cy + (my - cy - ed.canvas_y) / z;
+      this._setView(z2, mx - cx - (px - cx) * z2, my - cy - (py - cy) * z2);
+    },
+
+    _zoomCenter(factor) {
+      const r = this.$refs.canvas.getBoundingClientRect();
+      this._zoomAt(r.left + r.width / 2, r.top + r.height / 2, factor);
+    },
+
+    zoomIn() { this.editor && this._zoomCenter(1.2); },
+    zoomOut() { this.editor && this._zoomCenter(1 / 1.2); },
   };
 }

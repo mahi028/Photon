@@ -75,7 +75,11 @@ def test_batch_end_to_end(make_user, disk_png):
     b = _wait(c, bid)
     assert b["status"] == "done" and b["done"] == 3 and b["failed"] == 0, b
     assert "n.number" in b["columns"] and b["tables"][0]["key"] == "p.out_dict"
+    assert "p.out_dict" not in b["columns"], "tables get their own CSV, not a JSON blob column"
     assert all(it["outputs"] for it in b["items"])
+    assert all(it["input_preview"].startswith("/previews/uploads/") for it in b["items"])
+    assert all(it["preview"] and it["preview"]["node_id"] for it in b["items"]), "last image made is kept"
+    assert c.get(it_prev := f"/api/batches/{bid}/files/{b['items'][0]['preview']['path']}").status_code == 200
     prev = b["items"][0]["outputs"][0]["preview"]
     assert c.get(f"/api/batches/{bid}/files/{prev}").status_code == 200
     assert c.get(f"/api/batches/{bid}/files/../../sessions.db").status_code == 404
@@ -118,3 +122,12 @@ def test_failures_cancel_retry(make_user, disk_png):
     c.post(f"/api/batches/{bid2}/cancel")
     b2 = _wait(c, bid2)
     assert b2["status"] in ("cancelled", "done") and b2["done"] + b2["cancelled"] == 3
+
+
+def test_batch_page_component_attribute(make_user):
+    """x-data must survive HTML parsing: tojson emits double quotes (blank-page bug)."""
+    import re
+    c, _, _ = make_user()
+    html = c.get("/batches/056e9176aa304722ac86ef0fea5a9f5f").data.decode()
+    assert re.search(r"x-data='batchPage\(\"056e9176aa304722ac86ef0fea5a9f5f\"\)'", html), \
+        re.findall(r"x-data=.{0,60}", html)

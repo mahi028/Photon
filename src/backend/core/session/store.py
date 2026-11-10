@@ -306,6 +306,12 @@ def init_db():
             conn.execute("ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'")
         except Exception:
             pass
+        # Batch rows: a preview of the last image a node made, for graphs whose
+        # images all feed further nodes (no final output to show). D-046.
+        try:
+            conn.execute("ALTER TABLE batch_items ADD COLUMN preview_json TEXT")
+        except Exception:
+            pass
 
 
 def _seed_presets(conn) -> None:
@@ -1142,15 +1148,18 @@ def list_batch_items(batch_id: str, statuses: Optional[List[str]] = None) -> Lis
             d = dict(r)
             for k in ("values", "outputs", "tables"):
                 d[k] = json.loads(d.pop(f"{k}_json") or ("{}" if k == "values" else "[]"))
+            d["preview"] = json.loads(d.pop("preview_json", None) or "null")
             out.append(d)
         return out
 
 
 def update_batch_item(batch_id: str, idx: int, **fields) -> None:
     cols = {"status": "status", "error": "error", "seconds": "seconds",
-            "values": "values_json", "outputs": "outputs_json", "tables": "tables_json"}
+            "values": "values_json", "outputs": "outputs_json", "tables": "tables_json",
+            "preview": "preview_json"}
     keys = [k for k in fields if k in cols]
-    vals = [json.dumps(fields[k]) if k in ("values", "outputs", "tables") else fields[k] for k in keys]
+    vals = [json.dumps(fields[k]) if k in ("values", "outputs", "tables", "preview") else fields[k]
+            for k in keys]
     with closing(_get_conn()) as conn, conn:
         conn.execute(f"UPDATE batch_items SET {', '.join(cols[k] + ' = ?' for k in keys)} "
                      "WHERE batch_id = ? AND idx = ?", vals + [batch_id, idx])
