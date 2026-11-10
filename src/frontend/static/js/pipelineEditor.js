@@ -413,12 +413,12 @@ function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null)
     _loadAssets() {
       if (this._assetsLoading) return;
       this._assetsLoading = true;
-      fetch('/api/models').then(r => r.ok ? r.json() : {models: []})
+      fetch('/api/models?kind=sklearn').then(r => r.ok ? r.json() : {models: []})
         .then(d => { this.savedModels = d.models || []; });
       fetch('/api/annotations').then(r => r.ok ? r.json() : {annotations: []})
         .then(d => { this.savedLabels = d.annotations || []; });
-      fetch('/api/seg-models').then(r => r.ok ? r.json() : {models: []})
-        .then(d => { this.segModels = (d.models || []).filter(m => m.status === 'ready'); });
+      fetch('/api/models?kind=segmentation&status=ready').then(r => r.ok ? r.json() : {models: []})
+        .then(d => { this.segModels = d.models || []; });
     },
 
     setParam(name, value, kind) {

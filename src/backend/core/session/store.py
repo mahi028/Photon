@@ -25,6 +25,35 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
+def _migrate_model_tables(conn) -> None:
+    """D-049: fold trained_models (D-044) and seg_models (D-047) into `models`,
+    keeping ids (pipelines refer to them) and files where they are; then drop
+    the old tables. Runs inside init_db's transaction; idempotent."""
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "trained_models" in names:
+        for r in conn.execute("SELECT * FROM trained_models").fetchall():
+            r = dict(r)
+            spec = {"estimator": r["estimator"], "versions": json.loads(r["versions_json"] or "{}"),
+                    "session_id": r["session_id"], "pipeline_title": r["pipeline_title"],
+                    "summary": r["summary"]}
+            conn.execute("""INSERT OR IGNORE INTO models (model_id, user_id, kind, name, file, size_bytes,
+                            sha256, status, error, spec_json, info_json, created_at, published, deleted_at)
+                            VALUES (?, ?, 'sklearn', ?, ?, ?, NULL, 'ready', NULL, ?, NULL, ?, ?, ?)""",
+                         (r["model_id"], r["user_id"], r["name"], f"trained_models/{r['model_id']}.skops",
+                          r["size_bytes"], json.dumps(spec), r["created_at"], r["published"], r["deleted_at"]))
+        conn.execute("DROP TABLE trained_models")
+    if "seg_models" in names:
+        for r in conn.execute("SELECT * FROM seg_models").fetchall():
+            r = dict(r)
+            conn.execute("""INSERT OR IGNORE INTO models (model_id, user_id, kind, name, file, size_bytes,
+                            sha256, status, error, spec_json, info_json, created_at, published, deleted_at)
+                            VALUES (?, ?, 'segmentation', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         (r["model_id"], r["user_id"], r["name"], f"model_weights/{r['weights_file']}",
+                          r["size_bytes"], r["sha256"], r["status"], r["error"], r["spec_json"],
+                          r["info_json"], r["created_at"], r["published"], r["deleted_at"]))
+        conn.execute("DROP TABLE seg_models")
+
+
 def init_db():
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
@@ -173,27 +202,32 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id)")
-        # Saved models (D-044): fitted scikit-learn models stored as skops files
-        # in volumes/trained_models/<model_id>.skops. Rows are immutable once
-        # written; published=1 means a published pipeline loads it, so anyone
-        # running that pipeline may read it and the file is kept after delete.
+        # Models (D-049): every model a user has, one row each. kind sklearn
+        # (made by ml_save_model, a .skops file) or segmentation (uploaded
+        # weights + spec, checked before use). `file` is relative to volumes/.
+        # Rows are never rewritten except status / published / deleted_at;
+        # published=1 means a published pipeline uses it: anyone running that
+        # pipeline may load it, and deleting only hides it (the file stays).
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS trained_models (
+            CREATE TABLE IF NOT EXISTS models (
                 model_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
                 name TEXT NOT NULL,
-                estimator TEXT NOT NULL,
+                file TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL,
-                versions_json TEXT,
-                session_id TEXT,
-                pipeline_title TEXT,
-                summary TEXT,
+                sha256 TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                spec_json TEXT NOT NULL,
+                info_json TEXT,
                 created_at TEXT NOT NULL,
                 published INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_trained_models_user ON trained_models (user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_models_user ON models (user_id, kind)")
+        _migrate_model_tables(conn)
         # Label images painted in the UI (D-044): volumes/annotations/<id>.png,
         # uint8, 0 = unlabeled, 1..N = classes. One per (user, image, name).
         conn.execute("""
@@ -210,27 +244,6 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_user_image ON annotations (user_id, image_id)")
-        # Uploaded segmentation models (D-047): weights in volumes/model_weights,
-        # a declarative spec (allow-listed smp architecture + preprocessing),
-        # status checking -> ready | failed after an isolated load/forward check.
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS seg_models (
-                model_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                spec_json TEXT NOT NULL,
-                weights_file TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                sha256 TEXT NOT NULL,
-                status TEXT NOT NULL,
-                error TEXT,
-                info_json TEXT,
-                created_at TEXT NOT NULL,
-                published INTEGER NOT NULL DEFAULT 0,
-                deleted_at TEXT
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_seg_models_user ON seg_models (user_id)")
         # Batch runs (D-046): one pipeline over many images, in the background.
         # graph_json / customs_json are frozen at creation (edits don't touch a
         # running batch); runner_pid lets a restart tell its own dead batches
@@ -997,54 +1010,6 @@ def touch_api_key(key_id: str, used_at: str) -> None:
 # Saved models and annotations (D-044)
 # ---------------------------------------------------------------------------
 
-def _model_row(r) -> Dict[str, Any]:
-    d = dict(r)
-    d["versions"] = json.loads(d.pop("versions_json") or "{}")
-    d["published"] = bool(d["published"])
-    return d
-
-
-def add_trained_model(row: Dict[str, Any]) -> None:
-    with closing(_get_conn()) as conn, conn:
-        conn.execute("""
-            INSERT INTO trained_models (model_id, user_id, name, estimator, size_bytes, versions_json,
-                                        session_id, pipeline_title, summary, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (row["model_id"], row["user_id"], row["name"], row["estimator"], row["size_bytes"],
-              json.dumps(row.get("versions") or {}), row.get("session_id"), row.get("pipeline_title"),
-              row.get("summary"), row["created_at"]))
-
-
-def get_trained_model(model_id: str) -> Optional[Dict[str, Any]]:
-    with closing(_get_conn()) as conn, conn:
-        r = conn.execute("SELECT * FROM trained_models WHERE model_id = ?", (model_id,)).fetchone()
-        return _model_row(r) if r else None
-
-
-def list_trained_models(user_id: str) -> List[Dict[str, Any]]:
-    with closing(_get_conn()) as conn, conn:
-        rows = conn.execute("""
-            SELECT * FROM trained_models WHERE user_id = ? AND deleted_at IS NULL
-            ORDER BY created_at DESC
-        """, (user_id,)).fetchall()
-        return [_model_row(r) for r in rows]
-
-
-def mark_models_published(model_ids: List[str]) -> None:
-    with closing(_get_conn()) as conn, conn:
-        conn.executemany("UPDATE trained_models SET published = 1 WHERE model_id = ?",
-                         [(m,) for m in model_ids])
-
-
-def delete_trained_model(model_id: str, user_id: str, deleted_at: str) -> bool:
-    with closing(_get_conn()) as conn, conn:
-        cur = conn.execute("""
-            UPDATE trained_models SET deleted_at = ?
-            WHERE model_id = ? AND user_id = ? AND deleted_at IS NULL
-        """, (deleted_at, model_id, user_id))
-        return cur.rowcount > 0
-
-
 def _annotation_row(r) -> Dict[str, Any]:
     d = dict(r)
     d["classes"] = json.loads(d.pop("classes_json") or "[]")
@@ -1216,53 +1181,64 @@ def delete_batch(batch_id: str, user_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Uploaded segmentation models (D-047)
+# Models (D-049) — see core/models/records.py
 # ---------------------------------------------------------------------------
 
-def _seg_row(r) -> Dict[str, Any]:
+def _model_row(r) -> Dict[str, Any]:
     d = dict(r)
-    d["spec"] = json.loads(d.pop("spec_json"))
+    d["spec"] = json.loads(d.pop("spec_json") or "{}")
     d["info"] = json.loads(d.pop("info_json") or "{}")
     d["published"] = bool(d["published"])
     return d
 
 
-def add_seg_model(row: Dict[str, Any]) -> None:
+def add_model(row: Dict[str, Any]) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
-            INSERT INTO seg_models (model_id, user_id, name, spec_json, weights_file, size_bytes,
-                                    sha256, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (row["model_id"], row["user_id"], row["name"], json.dumps(row["spec"]), row["weights_file"],
-              row["size_bytes"], row["sha256"], row["status"], row["created_at"]))
+            INSERT INTO models (model_id, user_id, kind, name, file, size_bytes, sha256, status,
+                                error, spec_json, info_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["model_id"], row["user_id"], row["kind"], row["name"], row["file"], row["size_bytes"],
+              row.get("sha256"), row.get("status", "ready"), row.get("error"), json.dumps(row.get("spec") or {}),
+              json.dumps(row.get("info") or {}), row["created_at"]))
 
 
-def get_seg_model(model_id: str) -> Optional[Dict[str, Any]]:
+def get_model(model_id: str) -> Optional[Dict[str, Any]]:
     with closing(_get_conn()) as conn, conn:
-        r = conn.execute("SELECT * FROM seg_models WHERE model_id = ?", (model_id,)).fetchone()
-        return _seg_row(r) if r else None
+        r = conn.execute("SELECT * FROM models WHERE model_id = ?", (model_id,)).fetchone()
+        return _model_row(r) if r else None
 
 
-def list_seg_models(user_id: str) -> List[Dict[str, Any]]:
+def list_models(user_id: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    """A user's models (not deleted), newest first, optionally of one kind."""
     with closing(_get_conn()) as conn, conn:
-        rows = conn.execute("""SELECT * FROM seg_models WHERE user_id = ? AND deleted_at IS NULL
-                               ORDER BY created_at DESC""", (user_id,)).fetchall()
-        return [_seg_row(r) for r in rows]
+        sql = "SELECT * FROM models WHERE user_id = ? AND deleted_at IS NULL"
+        args: list = [user_id]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        return [_model_row(r) for r in conn.execute(sql + " ORDER BY created_at DESC", args).fetchall()]
 
 
-def seg_models_with_status(status: str) -> List[str]:
+def models_with_status(status: str, kind: Optional[str] = None) -> List[str]:
     with closing(_get_conn()) as conn, conn:
-        return [r[0] for r in conn.execute(
-            "SELECT model_id FROM seg_models WHERE status = ? AND deleted_at IS NULL", (status,))]
+        sql = "SELECT model_id FROM models WHERE status = ? AND deleted_at IS NULL"
+        args: list = [status]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        return [r[0] for r in conn.execute(sql, args)]
 
 
-def update_seg_model(model_id: str, **fields) -> None:
+def update_model(model_id: str, **fields) -> None:
     cols = {"status": "status", "error": "error", "info": "info_json", "deleted_at": "deleted_at",
             "published": "published"}
     keys = [k for k in fields if k in cols]
+    if not keys:
+        return
     vals = [json.dumps(fields[k]) if k == "info" else fields[k] for k in keys]
     with closing(_get_conn()) as conn, conn:
-        conn.execute(f"UPDATE seg_models SET {', '.join(cols[k] + ' = ?' for k in keys)} WHERE model_id = ?",
+        conn.execute(f"UPDATE models SET {', '.join(cols[k] + ' = ?' for k in keys)} WHERE model_id = ?",
                      vals + [model_id])
 
 

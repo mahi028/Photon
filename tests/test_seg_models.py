@@ -43,7 +43,7 @@ class _Evil:
 def _wait_status(c, mid, timeout=900):
     t0 = time.time()
     while time.time() - t0 < timeout:
-        r = c.get(f"/api/seg-models/{mid}").get_json()
+        r = c.get(f"/api/models/{mid}").get_json()
         if r["status"] != "checking":
             return r
         time.sleep(1)
@@ -65,15 +65,15 @@ def test_upload_check_and_refusals(make_user, tiny_weights, tmp_path):
     c, _, _ = make_user()
     other, _, _ = make_user()
     data = tiny_weights.read_bytes()
-    r = c.post("/api/seg-models", content_type="multipart/form-data",
+    r = c.post("/api/models", content_type="multipart/form-data",
                data={"weights": (io.BytesIO(data), "tiny.pth"), "spec": json.dumps(SPEC)})
     assert r.status_code == 202, r.get_json()
     ok = _wait_status(c, r.get_json()["model_id"])
     assert ok["status"] == "ready", ok
     assert ok["info"]["output_shape"] == [1, 1, 64, 96] and ok["info"]["parameters"] > 1_000_000
-    assert other.get(f"/api/seg-models/{ok['model_id']}").status_code == 404
+    assert other.get(f"/api/models/{ok['model_id']}").status_code == 404
 
-    wrong = c.post("/api/seg-models", content_type="multipart/form-data",
+    wrong = c.post("/api/models", content_type="multipart/form-data",
                    data={"weights": (io.BytesIO(data), "tiny.pth"), "spec": json.dumps({**SPEC, "classes": 3,
                                                                                           "activation": "softmax"})})
     bad = _wait_status(c, wrong.get_json()["model_id"])
@@ -81,14 +81,14 @@ def test_upload_check_and_refusals(make_user, tiny_weights, tmp_path):
 
     _Evil.marker = str(tmp_path / "pwned")
     evil = pickle.dumps({"state_dict": _Evil()})
-    r = c.post("/api/seg-models", content_type="multipart/form-data",
+    r = c.post("/api/models", content_type="multipart/form-data",
                data={"weights": (io.BytesIO(evil), "evil.pth"), "spec": json.dumps(SPEC)})
     res = _wait_status(c, r.get_json()["model_id"])
     assert res["status"] == "failed" and not os.path.exists(_Evil.marker), "weights_only refused the pickle"
 
-    assert c.post("/api/seg-models", content_type="multipart/form-data",
+    assert c.post("/api/models", content_type="multipart/form-data",
                   data={"weights": (io.BytesIO(b"x"), "w.exe"), "spec": json.dumps(SPEC)}).status_code == 400
-    assert c.post("/api/seg-models", content_type="multipart/form-data",
+    assert c.post("/api/models", content_type="multipart/form-data",
                   data={"weights": (io.BytesIO(data), "w.pth"), "spec": "{}"}).status_code == 400
 
 
@@ -104,7 +104,7 @@ def test_grants_and_sidecar_run(make_user, tiny_weights, tmp_path):
     graph = {"nodes": [{"id": "m", "op": "segment_with_model", "params": {"model_id": mid}}], "edges": []}
     with pytest.raises(user_models.SpecError, match="isn't ready"):
         user_models.issue_grants(graph, uid)                    # still 'checking'
-    store.update_seg_model(mid, status="ready")
+    store.update_model(mid, status="ready")
     with pytest.raises(user_models.SpecError):
         user_models.issue_grants(graph, other_uid)              # not theirs
     grants = user_models.issue_grants(graph, uid)
@@ -148,3 +148,49 @@ def test_pre_and_post_processing():
     assert m[60, 100] and not m[110, 10]
     raw = segment_with_model(img, handle, model_id="x", postprocess=False)["mask"]
     assert not raw[55, 85]
+
+
+def test_models_api_lists_both_kinds(make_user, tiny_weights):
+    from src.backend.core.session import store
+    c, uid, _ = make_user()
+    with open(tiny_weights, "rb") as f:
+        seg = user_models.create(uid, SPEC, "tiny.pth", f, run_check=False)
+    store.add_model({"model_id": "e" * 32, "user_id": uid, "kind": "sklearn", "name": "rf", "file": "models/x.skops",
+                     "size_bytes": 10, "status": "ready", "spec": {"estimator": "RandomForestClassifier"},
+                     "created_at": "2026-01-01T00:00:00"})
+    kinds = {m["kind"] for m in c.get("/api/models").get_json()["models"]}
+    assert kinds == {"sklearn", "segmentation"}
+    only = c.get("/api/models?kind=sklearn").get_json()["models"]
+    assert [m["model_id"] for m in only] == ["e" * 32] and only[0]["estimator"] == "RandomForestClassifier"
+    assert c.get("/api/models?kind=segmentation&status=ready").get_json()["models"] == []   # still checking
+    assert c.get("/api/models?kind=nope").status_code == 400
+    assert c.get(f"/api/models/{seg['model_id']}").get_json()["kind"] == "segmentation"
+    assert c.delete(f"/api/models/{seg['model_id']}").status_code == 204
+    assert c.get(f"/api/models/{seg['model_id']}").status_code == 404
+
+
+def test_migration_from_old_tables():
+    """D-049: rows of trained_models / seg_models move into `models` with ids and files kept."""
+    from contextlib import closing
+    from src.backend.core.session import store
+    with closing(store._get_conn()) as conn, conn:
+        conn.execute("""CREATE TABLE trained_models (model_id TEXT PRIMARY KEY, user_id TEXT, name TEXT, estimator TEXT,
+                        size_bytes INTEGER, versions_json TEXT, session_id TEXT, pipeline_title TEXT, summary TEXT,
+                        created_at TEXT, published INTEGER DEFAULT 0, deleted_at TEXT)""")
+        conn.execute("""CREATE TABLE seg_models (model_id TEXT PRIMARY KEY, user_id TEXT, name TEXT, spec_json TEXT,
+                        weights_file TEXT, size_bytes INTEGER, sha256 TEXT, status TEXT, error TEXT, info_json TEXT,
+                        created_at TEXT, published INTEGER DEFAULT 0, deleted_at TEXT)""")
+        conn.execute("INSERT INTO trained_models VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("1" * 32, "u1", "old rf", "RandomForestClassifier", 123, '{"numpy": "2"}', "s1", "train", "RF()",
+                      "2026-01-01", 1, None))
+        conn.execute("INSERT INTO seg_models VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("2" * 32, "u1", "old seg", json.dumps(SPEC), "2" * 32 + ".pth", 456, "ab", "ready", None,
+                      '{"parameters": 5}', "2026-01-02", 0, None))
+    store.init_db()
+    a, b = store.get_model("1" * 32), store.get_model("2" * 32)
+    assert a["kind"] == "sklearn" and a["file"] == f"trained_models/{'1' * 32}.skops" and a["published"]
+    assert a["spec"]["estimator"] == "RandomForestClassifier" and a["spec"]["versions"] == {"numpy": "2"}
+    assert b["kind"] == "segmentation" and b["file"] == f"model_weights/{'2' * 32}.pth" and b["info"]["parameters"] == 5
+    with closing(store._get_conn()) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "trained_models" not in names and "seg_models" not in names

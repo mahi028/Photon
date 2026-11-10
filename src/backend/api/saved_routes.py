@@ -1,7 +1,5 @@
-"""Saved models and painted labels (D-044).
+"""Painted labels (D-044). Models are in model_routes.py (D-049).
 
-  GET    /api/models                         your saved models
-  DELETE /api/models/<id>
   GET    /api/annotations?image_id=          your label images (for one image)
   POST   /api/annotations                    {image_id, png (base64 or data: URL), name,
                                               classes, annotation_id?} create or replace
@@ -21,20 +19,6 @@ from ..core.pipeline import saved
 from ..core.session import store
 
 saved_bp = Blueprint("saved", __name__)
-
-
-@saved_bp.route("/models", methods=["GET"])
-@login_required
-def list_models():
-    return jsonify({"models": saved.list_models(get_current_user_id())}), 200
-
-
-@saved_bp.route("/models/<model_id>", methods=["DELETE"])
-@login_required
-def delete_model(model_id: str):
-    if not saved.delete_model(get_current_user_id(), model_id):
-        return jsonify({"error": "Model not found"}), 404
-    return "", 204
 
 
 @saved_bp.route("/annotations", methods=["GET"])

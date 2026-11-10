@@ -96,8 +96,7 @@ def usage(user_id: str, fresh: bool = False) -> dict:
     with closing(store._get_conn()) as conn:
         q = lambda sql: int(conn.execute(sql, (user_id,)).fetchone()[0] or 0)
         images = q("SELECT SUM(size_bytes) FROM images WHERE owner_id = ?")
-        models = (q("SELECT SUM(size_bytes) FROM seg_models WHERE user_id = ? AND deleted_at IS NULL")
-                  + q("SELECT SUM(size_bytes) FROM trained_models WHERE user_id = ? AND deleted_at IS NULL"))
+        models = q("SELECT SUM(size_bytes) FROM models WHERE user_id = ? AND deleted_at IS NULL")
         sessions = [r[0] for r in conn.execute("SELECT session_id FROM sessions WHERE user_id = ?", (user_id,))]
         batches = [r[0] for r in conn.execute("SELECT batch_id FROM batches WHERE user_id = ?", (user_id,))]
     outputs = sum(_dir_bytes(config.OUTPUTS_DIR / s) for s in sessions)

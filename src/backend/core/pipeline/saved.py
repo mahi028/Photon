@@ -40,12 +40,6 @@ class AssetError(Exception):
         self.status = status
 
 
-def models_dir() -> Path:
-    d = config.VOLUMES_DIR / "trained_models"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def annotations_dir() -> Path:
     d = config.VOLUMES_DIR / "annotations"
     d.mkdir(parents=True, exist_ok=True)
@@ -53,7 +47,12 @@ def annotations_dir() -> Path:
 
 
 def model_path(model_id: str) -> Path:
-    return models_dir() / f"{model_id}.skops"
+    """File of a saved (sklearn) model, wherever the models table says it is."""
+    from ..models import records
+    row = records.get(model_id, "sklearn")
+    if not row:
+        raise AssetError(f"Saved model '{model_id}' was not found.", 404)
+    return records.file_path(row)
 
 
 def annotation_path(annotation_id: str) -> Path:
@@ -79,7 +78,8 @@ def annotation_ids(graph: dict) -> list[str]:
 
 
 def can_read_model(user_id: str, row: Optional[dict]) -> bool:
-    return bool(row) and (row["published"] or (row["user_id"] == user_id and not row["deleted_at"]))
+    from ..models import records
+    return records.can_use(user_id, row)
 
 
 def stage(graph: dict, user_id: str, image_id: Optional[str] = None,
@@ -91,11 +91,12 @@ def stage(graph: dict, user_id: str, image_id: Optional[str] = None,
     means its latest annotation, and every annotation must match its size.
     """
     assets: dict[str, str] = {}
+    from ..models import records
     for mid in model_ids(graph):
-        row = store.get_trained_model(mid) if _is_id(mid) else None
-        if not can_read_model(user_id, row) or not model_path(mid).is_file():
+        row = records.get(mid, "sklearn")
+        if not can_read_model(user_id, row) or not records.file_path(row).is_file():
             raise AssetError(f"Saved model '{mid}' was not found or is not yours.", 404)
-        assets[f"model:{mid}"] = str(model_path(mid))
+        assets[f"model:{mid}"] = str(records.file_path(row))
     for aid in annotation_ids(graph):
         if aid:
             row = store.get_annotation(aid) if _is_id(aid) else None
@@ -131,7 +132,10 @@ def _versions() -> dict[str, str]:
 
 def register_saved(user_id: str, saved: list[dict], session_id: Optional[str] = None,
                    pipeline_title: Optional[str] = None) -> list[dict]:
-    """Move the child's ml_save_model files into the store. Returns the new rows."""
+    """Move the child's ml_save_model files into the models store (kind
+    sklearn, D-049). Returns the new models."""
+    import hashlib
+    from ..models import records
     rows = []
     versions = _versions()
     for s in saved or []:
@@ -139,46 +143,38 @@ def register_saved(user_id: str, saved: list[dict], session_id: Optional[str] = 
         if not src.is_file() or src.suffix != ".skops":
             continue
         mid = uuid.uuid4().hex
-        shutil.move(str(src), model_path(mid))
-        row = {"model_id": mid, "user_id": user_id,
-               "name": str(s.get("name") or "model")[:MAX_NAME_LEN],
-               "estimator": str(s.get("estimator") or "?")[:80],
-               "size_bytes": model_path(mid).stat().st_size, "versions": versions,
-               "session_id": session_id, "pipeline_title": (pipeline_title or "")[:200],
-               "summary": str(s.get("summary") or "")[:300],
-               "created_at": datetime.utcnow().isoformat()}
-        store.add_trained_model(row)
-        rows.append(public_model(store.get_trained_model(mid)))
+        dst, rel = records.new_file(mid, ".skops")
+        shutil.move(str(src), dst)
+        spec = {"estimator": str(s.get("estimator") or "?")[:80], "versions": versions,
+                "session_id": session_id, "pipeline_title": (pipeline_title or "")[:200],
+                "summary": str(s.get("summary") or "")[:300]}
+        store.add_model({"model_id": mid, "user_id": user_id, "kind": "sklearn",
+                         "name": str(s.get("name") or "model")[:MAX_NAME_LEN], "file": rel,
+                         "size_bytes": dst.stat().st_size,
+                         "sha256": hashlib.sha256(dst.read_bytes()).hexdigest(),
+                         "status": "ready", "spec": spec, "created_at": datetime.utcnow().isoformat()})
+        rows.append(records.public(store.get_model(mid)))
     return rows
 
 
-def public_model(row: dict) -> dict:
-    return {k: row[k] for k in ("model_id", "name", "estimator", "size_bytes", "versions",
-                                "session_id", "pipeline_title", "summary", "created_at", "published")}
-
-
 def list_models(user_id: str) -> list[dict]:
-    return [public_model(r) for r in store.list_trained_models(user_id)]
+    from ..models import records
+    return records.list_for(user_id, "sklearn")
 
 
 def delete_model(user_id: str, model_id: str) -> bool:
-    row = store.get_trained_model(model_id) if _is_id(model_id) else None
-    if not row or row["user_id"] != user_id or row["deleted_at"]:
-        return False
-    store.delete_trained_model(model_id, user_id, datetime.utcnow().isoformat())
-    if not row["published"]:            # a published pipeline may still load it
-        model_path(model_id).unlink(missing_ok=True)
-    return True
+    from ..models import records
+    return bool(records.get(model_id, "sklearn")) and records.delete(user_id, model_id)
 
 
 def check_publishable(user_id: str, graph: dict) -> list[str]:
-    """Models a graph loads: each must be the publisher's own, or already
-    published (a fork of someone's pipeline keeps working)."""
-    ids = model_ids(graph)
-    for mid in ids:
-        row = store.get_trained_model(mid) if _is_id(mid) else None
-        if not row or not (row["published"] or (row["user_id"] == user_id and not row["deleted_at"])):
-            raise AssetError(f"Saved model '{mid}' isn't one of yours, so it can't be published.")
+    """Saved models a graph loads (each must be the publisher's own, or
+    already published); painted labels can't be published."""
+    from ..models import records
+    try:
+        ids = records.check_publishable(user_id, model_ids(graph), "sklearn", "Saved model")
+    except ValueError as e:
+        raise AssetError(str(e))
     if any(a for a in annotation_ids(graph)):
         raise AssetError("Painted labels are private and tied to one image; a published pipeline "
                          "can use load_labels only with annotation_id empty (the runner's own labels).")

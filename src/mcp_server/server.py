@@ -92,7 +92,7 @@ INSTRUCTIONS = (
         "\"version\": N}, \"params\": {\"<inner node>.<param>\": value}}; input 'image', outputs = its last "
         "nodes' ports (validate_pipeline lists them). "
         "Uploaded deep-learning segmentation models (e.g. tissue masks) run with the "
-        "segment_with_model node (list_seg_models; add one with register_seg_model). "
+        "segment_with_model node (list_models(kind='segmentation'); add one with register_model). "
         "For many images: upload_images (a zip or a folder) -> run_batch -> poll get_batch -> "
         "get_batch_results (CSV). describe_op('pipeline:<published_id>') shows a published "
         "pipeline's ports for use as a node. "
@@ -739,11 +739,26 @@ def save_pipeline(title: str, graph: dict, description: str = "") -> dict:
 
 
 @_tool(scope="read", annotations=_RO)
-def list_models() -> dict:
-    """Your saved models (fitted by a run that ended in ml_save_model). Apply one in a
-    graph with ml_load_model(model_id=...) -> ml_predict."""
-    from src.backend.core.pipeline import saved
-    return {"models": saved.list_models(_uid())}
+def list_models(kind: str | None = None) -> dict:
+    """Your models. kind: "sklearn" (fitted by a run ending in ml_save_model; apply with
+    ml_load_model(model_id=...) -> ml_predict) or "segmentation" (uploaded networks with
+    status checking / ready / failed; run with segment_with_model(model_id=...) -> mask,
+    probability, labels). Omit kind for both."""
+    from src.backend.core.models import records
+    if kind and kind not in records.KINDS:
+        raise ToolError(f"kind must be one of {', '.join(records.KINDS)}")
+    return {"models": records.list_for(_uid(), kind)}
+
+
+@_tool(scope="read", annotations=_RO)
+def get_model(model_id: str) -> dict:
+    """One of your models; poll after register_model until status is ready (or failed,
+    with the reason)."""
+    from src.backend.core.models import records
+    row = records.get(model_id)
+    if not row or row["user_id"] != _uid() or row["deleted_at"]:
+        raise ToolError("Model not found.")
+    return records.public(row)
 
 
 @_tool(scope="read", annotations=_RO)
@@ -879,28 +894,8 @@ def get_batch_results(batch_id: str, table: str | None = None, offset: int = 0,
         raise ToolError(str(e))
 
 
-@_tool(scope="read", annotations=_RO)
-def list_seg_models() -> dict:
-    """Your uploaded segmentation models (status checking / ready / failed). Run one in a
-    graph with the segment_with_model node: {"op": "segment_with_model", "params":
-    {"model_id": ...}} -> outputs mask, probability, labels."""
-    from src.backend.core.models import user_models
-    return {"models": [user_models.public(r) for r in store.list_seg_models(_uid())]}
-
-
-@_tool(scope="read", annotations=_RO)
-def get_seg_model(model_id: str) -> dict:
-    """One uploaded segmentation model; poll after register_seg_model until status is
-    ready (or failed, with the reason)."""
-    from src.backend.core.models import user_models
-    row = store.get_seg_model(model_id)
-    if not row or row["user_id"] != _uid() or row["deleted_at"]:
-        raise ToolError("Model not found.")
-    return user_models.public(row)
-
-
 @_tool(scope="write")
-def register_seg_model(spec: dict, weights_path: str | None = None, weights_url: str | None = None,
+def register_model(spec: dict, weights_path: str | None = None, weights_url: str | None = None,
                        weights_base64: str | None = None, filename: str | None = None) -> dict:
     """Upload a segmentation model: weights (a state_dict; .pt/.pth/.bin/.ckpt/.safetensors)
     plus a spec. No code is uploaded: Photon builds the network from an allow-listed
@@ -914,7 +909,7 @@ def register_seg_model(spec: dict, weights_path: str | None = None, weights_url:
     "fill_holes", "smooth"}, "modality": e.g. "histology", "description"}.
     Weights from one of: weights_path (server disk, allow-listed dirs over HTTP),
     weights_url, weights_base64 (+ filename). The model is checked (load + forward pass)
-    in the background: poll get_seg_model."""
+    in the background: poll get_model. It is then listed with kind "segmentation"."""
     from src.backend.core.models import user_models
     if sum(map(bool, (weights_path, weights_url, weights_base64))) != 1:
         raise ToolError("Provide exactly one of weights_path, weights_url or weights_base64.")

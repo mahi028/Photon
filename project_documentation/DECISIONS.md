@@ -528,3 +528,17 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
   - Checked before anything new is written: every image upload (in `ingest_image_bytes`, which covers the web, batch upload and MCP), every session or chat or MCP run, batch creation, and model upload. Over quota gives HTTP 507 with the numbers and what to delete.
   - `GET /auth/me/usage` returns the breakdown; the user menu shows it, with a bar when a quota is set.
 - **Sign-up** defaults to `closed`. New accounts come from `python -m src.backend.cli user add`, or by setting `PHOTON_SIGNUP=open|invite` deliberately, preferably with an allow-list. Existing accounts are unaffected.
+
+## D-049 — One `models` table for every kind of model
+
+**Problem.** Saved scikit-learn models (D-044, `trained_models`) and uploaded segmentation networks (D-047, `seg_models`) were in two tables with mostly the same columns. That meant two lists (Pipelines page and Models page), two MCP list tools, two delete/publish paths and two quota queries.
+
+**Decision.** One `models` table:
+- **Columns:** `model_id`, `user_id`, **`kind`** (`sklearn` | `segmentation`), `name`, `file` (relative to `volumes/`), `size_bytes`, `sha256`, `status` (`ready` | `checking` | `failed`), `error`, `spec_json`, `info_json`, `created_at`, `published`, `deleted_at`.
+- **`spec_json` holds what differs:** for sklearn, the estimator, library versions, session and pipeline it came from, and a summary; for segmentation, the architecture and pre-/post-processing spec.
+- **Shared rules** live in `core/models/records.py`: who may use a model, delete (hidden; the file is kept while published), publish, file location and the public shape. `saved.py` (sklearn) and `user_models.py` (segmentation) use them.
+- **One API**, `/api/models[?kind=&status=]`: upload, get and delete live there, replacing `/api/seg-models` and the old sklearn-only `/api/models`. **One Models page** lists both kinds with a filter; the Pipelines page links to it instead of keeping its own list.
+- **MCP:** `list_models(kind)`, `get_model`, `register_model`, replacing `list_seg_models`, `get_seg_model` and `register_seg_model`.
+- **How they run is unchanged:** sklearn models still load in the sandboxed child (`ml_load_model`), segmentation models in the GPU sidecar with per-run grants (`segment_with_model`).
+
+**Migration.** `init_db` copies the rows of the old tables into `models`, keeping their IDs (pipelines refer to them) and leaving their files where they are (`file` = `trained_models/…` or `model_weights/…`). It then drops the old tables. New files go to `volumes/models/`.

@@ -210,24 +210,16 @@ def check(spec: dict, weights: Path) -> dict:
 # Storage
 # ---------------------------------------------------------------------------
 
-def weights_dir() -> Path:
-    d = config.VOLUMES_DIR / "model_weights"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _is_id(s: Any) -> bool:
-    return isinstance(s, str) and len(s) == 32 and all(c in "0123456789abcdef" for c in s)
-
-
 def public(row: dict) -> dict:
-    return {k: row[k] for k in ("model_id", "name", "spec", "size_bytes", "sha256", "status", "error",
-                                "info", "created_at", "published")} | {"description": row["spec"].get("description", "")}
+    from . import records
+    return records.public(row)
 
 
 def create(user_id: str, spec_raw: Any, filename: str, stream, run_check: bool = True) -> dict:
-    """Store an upload (validating in the background). `stream`: binary file object."""
+    """Store an upload as a `models` row of kind segmentation (D-049), status
+    checking, and check it in the background. `stream`: binary file object."""
     from ..session import store
+    from . import records
     spec = validate_spec(spec_raw)
     from ..housekeeping import QuotaError, check_quota
     try:
@@ -238,7 +230,7 @@ def create(user_id: str, spec_raw: Any, filename: str, stream, run_check: bool =
     if ext not in WEIGHT_EXTS:
         raise SpecError(f"weights file must be one of {', '.join(WEIGHT_EXTS)}")
     mid = uuid.uuid4().hex
-    path = weights_dir() / f"{mid}{ext}"
+    path, rel = records.new_file(mid, ext)
     h = hashlib.sha256()
     size = 0
     with open(path, "wb") as f:
@@ -256,19 +248,20 @@ def create(user_id: str, spec_raw: Any, filename: str, stream, run_check: bool =
     if not size:
         path.unlink(missing_ok=True)
         raise SpecError("empty weights file")
-    store.add_seg_model({"model_id": mid, "user_id": user_id, "name": spec["name"], "spec": spec,
-                         "weights_file": path.name, "size_bytes": size, "sha256": h.hexdigest(),
-                         "status": "checking", "created_at": datetime.utcnow().isoformat()})
+    store.add_model({"model_id": mid, "user_id": user_id, "kind": "segmentation", "name": spec["name"],
+                     "file": rel, "size_bytes": size, "sha256": h.hexdigest(), "status": "checking",
+                     "spec": spec, "created_at": datetime.utcnow().isoformat()})
     if run_check:
         import threading
         threading.Thread(target=run_check_now, args=(mid,), daemon=True).start()
-    return public(store.get_seg_model(mid))
+    return public(store.get_model(mid))
 
 
 def run_check_now(model_id: str) -> dict:
     """Check an upload in a separate CPU-only process; record ready / failed."""
     from ..session import store
-    row = store.get_seg_model(model_id)
+    from . import records
+    row = records.get(model_id, "segmentation")
     if not row:
         return {}
     env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp"),
@@ -277,7 +270,7 @@ def run_check_now(model_id: str) -> dict:
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "src.backend.core.models.user_models", "check",
-             str(weights_dir() / row["weights_file"]), json.dumps(row["spec"])],
+             str(records.file_path(row)), json.dumps(row["spec"])],
             capture_output=True, text=True, timeout=900, cwd=str(config.ROOT_DIR), env=env)
         last = (proc.stdout.strip().splitlines() or ["{}"])[-1]
         res = json.loads(last) if last.startswith("{") else {}
@@ -288,9 +281,9 @@ def run_check_now(model_id: str) -> dict:
     except Exception as e:                       # noqa: BLE001
         res = {"ok": False, "error": f"check could not run: {e}"}
     if res.get("ok"):
-        store.update_seg_model(model_id, status="ready", error=None, info=res.get("info") or {})
+        store.update_model(model_id, status="ready", error=None, info=res.get("info") or {})
     else:
-        store.update_seg_model(model_id, status="failed", error=str(res.get("error") or "check failed")[:1000])
+        store.update_model(model_id, status="failed", error=str(res.get("error") or "check failed")[:1000])
     return res
 
 
@@ -298,24 +291,18 @@ def recheck_stuck() -> None:
     """Uploads left 'checking' by a restart get checked again."""
     from ..session import store
     import threading
-    for mid in store.seg_models_with_status("checking"):
+    for mid in store.models_with_status("checking", "segmentation"):
         threading.Thread(target=run_check_now, args=(mid,), daemon=True).start()
 
 
 def can_use(user_id: str, row: Optional[dict]) -> bool:
-    return bool(row) and row["status"] == "ready" and not row["deleted_at"] and (
-        row["published"] or row["user_id"] == user_id)
+    from . import records
+    return records.can_use(user_id, row)
 
 
 def delete(user_id: str, model_id: str) -> bool:
-    from ..session import store
-    row = store.get_seg_model(model_id) if _is_id(model_id) else None
-    if not row or row["user_id"] != user_id or row["deleted_at"]:
-        return False
-    store.update_seg_model(model_id, deleted_at=datetime.utcnow().isoformat())
-    if not row["published"]:
-        (weights_dir() / row["weights_file"]).unlink(missing_ok=True)
-    return True
+    from . import records
+    return bool(records.get(model_id, "segmentation")) and records.delete(user_id, model_id)
 
 
 def model_ids(graph: dict) -> list[str]:
@@ -324,14 +311,11 @@ def model_ids(graph: dict) -> list[str]:
 
 
 def check_publishable(user_id: str, graph: dict) -> list[str]:
-    from ..session import store
-    ids = model_ids(graph)
-    for mid in ids:
-        row = store.get_seg_model(mid) if _is_id(mid) else None
-        if not row or row["status"] != "ready" or not (row["published"] or (row["user_id"] == user_id
-                                                                             and not row["deleted_at"])):
-            raise SpecError(f"Segmentation model '{mid}' isn't one of yours (or isn't ready), so it can't be published.")
-    return ids
+    from . import records
+    try:
+        return records.check_publishable(user_id, model_ids(graph), "segmentation", "Segmentation model")
+    except ValueError as e:
+        raise SpecError(str(e)) from None
 
 
 # ---------------------------------------------------------------------------
@@ -348,12 +332,12 @@ def grants_dir() -> Path:
 def issue_grants(graph: dict, user_id: str) -> dict[str, str]:
     """{model_id: token} for every user model the graph runs. Raises SpecError
     naming the first the user may not use."""
-    from ..session import store
+    from . import records
     out: dict[str, str] = {}
     for mid in model_ids(graph):
         if mid in out:
             continue
-        row = store.get_seg_model(mid) if _is_id(mid) else None
+        row = records.get(mid, "segmentation")
         if not can_use(user_id, row):
             raise SpecError(f"Segmentation model '{mid}' was not found, isn't ready, or is not yours.")
         token = secrets.token_hex(24)
@@ -369,7 +353,8 @@ def revoke_grants(grants: dict[str, str]) -> None:
 
 
 def check_grant(token: Any, model_id: Any) -> bool:
-    if not (isinstance(token, str) and re.fullmatch(r"[0-9a-f]{48}", token) and _is_id(model_id)):
+    from .records import is_id
+    if not (isinstance(token, str) and re.fullmatch(r"[0-9a-f]{48}", token) and is_id(model_id)):
         return False
     p = grants_dir() / token
     try:
@@ -384,12 +369,12 @@ def check_grant(token: Any, model_id: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 def model_spec(model_id: str):
-    from ..session import store
+    from . import records
     from .registry import ModelSpec
-    row = store.get_seg_model(model_id) if _is_id(model_id) else None
+    row = records.get(model_id, "segmentation")
     if not row or row["status"] != "ready" or (row["deleted_at"] and not row["published"]):
         return None
-    weights = weights_dir() / row["weights_file"]
+    weights = records.file_path(row)
     spec = row["spec"]
     H, W = spec["input_size"]
     vram = int(200 + 4 * row["size_bytes"] / 2**20 + H * W * 4 * 64 / 2**20)   # rough: weights + activations

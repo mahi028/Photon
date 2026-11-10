@@ -168,7 +168,7 @@ def _seg_postprocess(mask: np.ndarray, pp: dict) -> np.ndarray:
              Port("labels", PortType.ARRAY)],
     params=[
         Param("model_id", "str", None, required=True,
-              doc="An uploaded segmentation model (Models page, or list_seg_models over MCP)."),
+              doc="An uploaded segmentation model (Models page, or list_models(kind='segmentation') over MCP)."),
         Param("threshold", "float", None, nullable=True, min=0.0, max=1.0,
               doc="Probability cut-off for the mask. Empty: the model's own setting."),
         Param("postprocess", "bool", True,

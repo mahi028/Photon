@@ -11,7 +11,7 @@
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
       </a>
       <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
-      <span class="text-sm font-semibold text-gray-200">Segmentation models</span>
+      <span class="text-sm font-semibold text-gray-200">Models</span>
     </div>
     <a href="/pipelines" class="text-xs text-gray-400 hover:text-indigo-400">Pipelines</a>
   </header>
@@ -19,6 +19,10 @@
   <main class="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
     <div class="max-w-4xl mx-auto flex flex-col gap-6">
 
+      <p class="text-sm text-gray-400">
+        All your models. <b>Segmentation</b> models are networks you upload here; <b>scikit-learn</b> models
+        are created by pipeline runs that end in <code class="font-mono text-gray-300">ml_save_model</code>.
+      </p>
       <p class="text-sm text-gray-400">
         Upload a trained segmentation network (e.g. a tissue/background model) and use it as the
         <code class="font-mono text-gray-300">segment_with_model</code> node in any pipeline or batch.
@@ -29,7 +33,7 @@
       <!-- Upload -->
       <section class="panel flex flex-col gap-4">
         <div class="flex items-center justify-between gap-2">
-          <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Add a model</h2>
+          <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Upload a segmentation model</h2>
           <select @change="applyPreset($event.target.value); $event.target.value = ''"
                   class="bg-gray-950 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300">
             <option value="">Fill from a preset…</option>
@@ -122,30 +126,43 @@
 
       <!-- List -->
       <section class="flex flex-col gap-2">
-        <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Your models</h2>
-        <template x-if="!models.length"><p class="text-sm text-gray-600">No models yet.</p></template>
-        <template x-for="m in models" :key="m.model_id">
+        <div class="flex items-center gap-3">
+          <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Your models</h2>
+          <div class="flex bg-gray-800 rounded-lg p-0.5 text-[11px] font-medium">
+            <template x-for="k in [['', 'all'], ['segmentation', 'segmentation'], ['sklearn', 'scikit-learn']]" :key="k[0]">
+              <button @click="kindFilter = k[0]" :class="kindFilter === k[0] ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'"
+                      class="px-2 py-0.5 rounded-md" x-text="k[1]"></button>
+            </template>
+          </div>
+        </div>
+        <template x-if="!shown.length"><p class="text-sm text-gray-600">No models yet.</p></template>
+        <template x-for="m in shown" :key="m.model_id">
           <div class="panel flex flex-col gap-1.5 py-3">
             <div class="flex items-center gap-2 min-w-0">
               <span class="text-sm font-medium text-gray-100 truncate" x-text="m.name"></span>
-              <span class="text-xs px-1.5 py-0.5 rounded" :class="statusClass(m.status)" x-text="m.status"></span>
+              <span class="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-300" x-text="m.kind === 'sklearn' ? 'scikit-learn' : 'segmentation'"></span>
+              <span x-show="m.status !== 'ready'" class="text-xs px-1.5 py-0.5 rounded" :class="statusClass(m.status)" x-text="m.status"></span>
               <span x-show="m.spec.modality" class="text-xs bg-gray-800 text-gray-300 px-1.5 py-0.5 rounded" x-text="m.spec.modality"></span>
-              <span x-show="m.published" class="text-xs bg-indigo-900 text-indigo-300 px-1.5 py-0.5 rounded">published</span>
+              <span x-show="m.published" class="text-xs bg-indigo-900 text-indigo-300 px-1.5 py-0.5 rounded" title="A published pipeline uses this model">published</span>
               <span class="flex-1"></span>
               <button @click="copy(m.model_id)" class="text-[11px] font-mono text-gray-500 hover:text-gray-300" title="Copy model id" x-text="m.model_id.slice(0, 8) + '…'"></button>
               <button @click="remove(m)" class="text-xs text-gray-500 hover:text-red-400">Delete</button>
             </div>
             <div class="text-[11px] text-gray-500 flex flex-wrap gap-x-3">
-              <span x-text="`${m.spec.arch} · ${m.spec.encoder} · ${m.spec.classes} class${m.spec.classes > 1 ? 'es' : ''} · ${m.spec.activation}`"></span>
-              <span x-text="`input ${m.spec.input_size[0]}×${m.spec.input_size[1]} ${m.spec.color.toUpperCase()} · ${m.spec.normalize}`"></span>
+              <template x-if="m.kind === 'segmentation'">
+                <span x-text="`${m.spec.arch} · ${m.spec.encoder} · ${m.spec.classes} class${m.spec.classes > 1 ? 'es' : ''} · ${m.spec.activation} · input ${m.spec.input_size[0]}×${m.spec.input_size[1]} ${m.spec.color.toUpperCase()} · ${m.spec.normalize}`"></span>
+              </template>
+              <template x-if="m.kind === 'sklearn'">
+                <span x-text="`${m.spec.estimator}${m.spec.pipeline_title ? ' · from ' + m.spec.pipeline_title : ''}${(m.spec.versions || {})['scikit-learn'] ? ' · scikit-learn ' + m.spec.versions['scikit-learn'] : ''}`"></span>
+              </template>
               <span x-text="(m.size_bytes / 1048576).toFixed(1) + ' MB'"></span>
               <span x-show="m.info && m.info.parameters" x-text="((m.info || {}).parameters / 1e6).toFixed(1) + ' M params'"></span>
+              <span x-text="new Date(m.created_at + 'Z').toLocaleString()"></span>
             </div>
-            <p x-show="m.spec.description" class="text-xs text-gray-400" x-text="m.spec.description"></p>
+            <p x-show="m.description" class="text-xs text-gray-400" x-text="m.description"></p>
             <p x-show="m.error" class="text-xs text-red-400 break-words" x-text="m.error"></p>
-            <p x-show="m.status === 'ready'" class="text-[11px] text-gray-600">
-              Use it: add <code class="font-mono">segment_with_model</code> in the pipeline editor and pick this model.
-            </p>
+            <p x-show="m.status === 'ready'" class="text-[11px] text-gray-600"
+               x-html="m.kind === 'segmentation' ? 'Use it: a <code class=&quot;font-mono&quot;>segment_with_model</code> node, then pick this model.' : 'Use it: <code class=&quot;font-mono&quot;>ml_load_model</code> → <code class=&quot;font-mono&quot;>ml_predict</code>, then pick this model.'"></p>
           </div>
         </template>
       </section>
@@ -176,11 +193,12 @@ function segModels() {
   const blank = () => ({name: '', description: '', modality: '', foreground_class: 1,
                         ...JSON.parse(JSON.stringify(SEG_PRESETS.segformer_tissue))});
   return {
-    opts: {}, models: [], spec: blank(), file: null, busy: false, error: '',
+    opts: {}, models: [], spec: blank(), file: null, busy: false, error: '', kindFilter: '',
+    get shown() { return this.models.filter(m => !this.kindFilter || m.kind === this.kindFilter); },
     meanText: '', stdText: '', timer: null,
 
     async init() {
-      const [o, l] = await Promise.all([fetch('/api/seg-models/options'), fetch('/api/seg-models')]);
+      const [o, l] = await Promise.all([fetch('/api/models/options'), fetch('/api/models')]);
       if (o.ok) this.opts = await o.json();
       if (l.ok) this.models = (await l.json()).models;
       this.poll();
@@ -190,7 +208,7 @@ function segModels() {
       clearTimeout(this.timer);
       if (this.models.some(m => m.status === 'checking')) {
         this.timer = setTimeout(async () => {
-          const r = await fetch('/api/seg-models');
+          const r = await fetch('/api/models');
           if (r.ok) this.models = (await r.json()).models;
           this.poll();
         }, 2500);
@@ -220,7 +238,7 @@ function segModels() {
         const fd = new FormData();
         fd.append('weights', this.file, this.file.name);
         fd.append('spec', JSON.stringify(spec));
-        const res = await fetch('/api/seg-models', {method: 'POST', body: fd});
+        const res = await fetch('/api/models', {method: 'POST', body: fd});
         const data = await res.json().catch(() => ({error: `Upload failed (${res.status})`}));
         if (!res.ok) { this.error = data.error || 'Upload failed'; return; }
         this.models = [data, ...this.models];
@@ -234,7 +252,7 @@ function segModels() {
     async remove(m) {
       const note = m.published ? ' A published pipeline uses it, so it keeps working there.' : '';
       if (!(await window.ui.confirm({title: 'Delete model?', message: `"${m.name}" is removed.${note}`, confirmText: 'Delete', danger: true}))) return;
-      const r = await fetch(`/api/seg-models/${m.model_id}`, {method: 'DELETE'});
+      const r = await fetch(`/api/models/${m.model_id}`, {method: 'DELETE'});
       if (r.ok) this.models = this.models.filter(x => x.model_id !== m.model_id);
       else window.ui.toast('Delete failed', 'error');
     },

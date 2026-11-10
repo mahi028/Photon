@@ -125,9 +125,8 @@ def publish(user_id: str, pipeline_id: str, changelog: str = "",
         published_id = uuid.uuid4().hex
 
     from . import library
-    store.mark_models_published(model_ids)
-    for mid in seg_model_ids:
-        store.update_seg_model(mid, published=1)
+    from ..models import records
+    records.mark_published(model_ids + seg_model_ids)          # D-049: one models table
     version = store.add_published_version(
         published_id, user_id, pipeline_id, title, description, graph, snapshot,
         (changelog or "").strip()[:MAX_CHANGELOG], datetime.utcnow().isoformat(),
