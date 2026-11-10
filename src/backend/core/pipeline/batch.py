@@ -136,6 +136,11 @@ def create(user_id: str, images: list[dict], title: str | None = None, **source)
     (+version) | graph. Returns the batch."""
     if not images:
         raise BatchError("No images.")
+    from ..housekeeping import QuotaError, check_quota
+    try:
+        check_quota(user_id)                                # D-048
+    except QuotaError as e:
+        raise BatchError(str(e), e.status)
     if len(images) > MAX_ITEMS:
         raise BatchError(f"{len(images)} images; a batch takes at most {MAX_ITEMS}.")
     active = [b for b in store.list_batches(user_id, 50) if b["status"] in ("queued", "running")]

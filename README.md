@@ -83,7 +83,7 @@ Open `http://localhost:8889` in your browser (the dev server; gunicorn/waitress 
 
 ## Accounts
 
-Sign-up is controlled by `PHOTON_SIGNUP` (`open`, `invite` or `closed`) plus optional email/domain allow-lists; see `.env.example`. With `open` and no allow-list, anyone who can reach the server can create an account and run code, and the app logs a warning at startup. Admin CLI:
+Sign-up is controlled by `PHOTON_SIGNUP` (`open`, `invite` or `closed`; default `closed`, so the first account comes from the admin CLI below) plus optional email/domain allow-lists; see `.env.example`. With `open` and no allow-list, anyone who can reach the server can create an account and run code, and the app logs a warning at startup. Admin CLI:
 
 ```bash
 uv run python -m src.backend.cli user list

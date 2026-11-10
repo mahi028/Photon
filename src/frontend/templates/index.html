@@ -72,6 +72,15 @@
           <a href="/models" class="block w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
             Models
           </a>
+          <div x-show="usage" class="px-4 py-2 border-b border-gray-800 text-[11px] text-gray-500" style="display:none;"
+               :title="usage && `images ${fmtGB(usage.images)} · outputs ${fmtGB(usage.session_outputs)} · batches ${fmtGB(usage.batch_outputs)} · models ${fmtGB(usage.models)}`">
+            <div class="flex justify-between"><span>Storage</span>
+              <span x-text="usage && (usage.quota ? `${fmtGB(usage.total)} / ${fmtGB(usage.quota)}` : fmtGB(usage.total))"></span></div>
+            <div x-show="usage && usage.quota" class="h-1 bg-gray-800 rounded mt-1 overflow-hidden">
+              <div class="h-full" :class="usage && usage.total > 0.9 * usage.quota ? 'bg-red-500' : 'bg-indigo-500'"
+                   :style="usage && usage.quota ? `width: ${Math.min(100, 100 * usage.total / usage.quota)}%` : ''"></div>
+            </div>
+          </div>
           <a href="/settings/api-keys" class="block w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
             API keys
           </a>
@@ -221,6 +230,8 @@
 function app() {
   return {
     currentUser: null,
+    usage: null,
+    fmtGB(n) { return n >= 1 << 30 ? (n / (1 << 30)).toFixed(2) + ' GB' : (n / (1 << 20)).toFixed(0) + ' MB'; },
 
     // LLM provider info / OpenRouter model selection
     llmProvider: null,
@@ -233,6 +244,7 @@ function app() {
       try {
         const res = await fetch('/auth/me');
         if (res.ok) this.currentUser = await res.json();
+        fetch('/auth/me/usage').then(r => r.ok ? r.json() : null).then(u => { this.usage = u; }).catch(() => {});
       } catch (e) {
         console.warn('Failed to load current user:', e);
       }

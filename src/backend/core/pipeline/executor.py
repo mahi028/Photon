@@ -319,6 +319,18 @@ def run_pipeline_subprocess(
     }
     preexec_fn = limits.make_preexec(timeout)
 
+    try:
+        return _run_child(script, scratch, result_path, child_env, preexec_fn, timeout)
+    finally:
+        # Scratch holds run.py, result.json and staged assets (copies of saved
+        # models / labels): never needed after the run (D-048).
+        if os.getenv("PHOTON_KEEP_SCRATCH") != "1":
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _run_child(script: Path, scratch: Path, result_path: Path, child_env: dict,
+               preexec_fn, timeout: int) -> dict[str, Any]:
     t0 = time.time()
     try:
         proc = subprocess.run(

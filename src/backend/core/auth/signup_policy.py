@@ -3,7 +3,7 @@
 Photon's trust model (D-035) is "every account is a trusted colleague", so
 account creation is the real perimeter. Configured by env vars:
 
-  PHOTON_SIGNUP                 open | invite | closed     (default: open)
+  PHOTON_SIGNUP                 open | invite | closed     (default: closed, D-048)
       open    anyone who reaches the login page may sign up (subject to the
               allow-list below);
       invite  password sign-up needs PHOTON_SIGNUP_INVITE_CODE; Google
@@ -44,7 +44,9 @@ class SignupPolicy:
 
     @classmethod
     def from_env(cls) -> "SignupPolicy":
-        mode = os.getenv("PHOTON_SIGNUP", "open").strip().lower()
+        # Default closed (D-048): an instance reachable on a network must not
+        # hand out accounts to anyone. Set open / invite deliberately.
+        mode = os.getenv("PHOTON_SIGNUP", "closed").strip().lower() or "closed"
         if mode not in MODES:
             raise ValueError(f"PHOTON_SIGNUP must be one of {MODES}, got {mode!r}")
         code = os.getenv("PHOTON_SIGNUP_INVITE_CODE", "")

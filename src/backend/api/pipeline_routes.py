@@ -348,6 +348,11 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
     sess = manager.get_session_for_user(session_id, user_id)
     if not sess:
         return {"error": "Session not found"}
+    from ..core.housekeeping import QuotaError, check_quota
+    try:
+        check_quota(user_id)                                # D-048
+    except QuotaError as e:
+        return {"error": str(e)}
 
     from .upload_routes import get_image_registry
     registry_images = get_image_registry()
@@ -509,6 +514,11 @@ def run_pipeline_route(session_id: str):
 
     if customs is None:
         customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
+    from ..core.housekeeping import QuotaError, check_quota
+    try:
+        check_quota(user_id)
+    except QuotaError as e:
+        return jsonify({"error": str(e)}), e.status
     issues = subgraph.validate(graph, customs, user_id)
     if issues:
         return jsonify({"error": "Pipeline is invalid",

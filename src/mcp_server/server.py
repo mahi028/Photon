@@ -985,6 +985,8 @@ def build_server(*, http_auth_url: str | None = None) -> MCPServer:
 def _recover_batches() -> None:
     from src.backend.core.pipeline import batch
     threading.Thread(target=batch.recover, name="batch-recover", daemon=True).start()
+    from src.backend.core import housekeeping
+    housekeeping.start()
 
 
 def main() -> None:

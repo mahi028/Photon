@@ -38,6 +38,11 @@ def ingest_image_bytes(file_bytes: bytes, original_filename: str,
     ok, err = validate_size(len(file_bytes))
     if not ok:
         raise IngestError(err, 400)
+    from ..housekeeping import QuotaError, check_quota
+    try:
+        check_quota(owner_id, len(file_bytes))           # D-048
+    except QuotaError as e:
+        raise IngestError(str(e), e.status) from None
 
     image_id = uuid.uuid4().hex
     ext = Path(original_filename).suffix.lower()

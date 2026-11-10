@@ -166,6 +166,16 @@ def logout():
     return redirect(url_for("auth.login_page"))
 
 
+@auth_bp.route("/auth/me/usage")
+def current_user_usage():
+    """Storage this user uses, by kind, and the quota (0 = unlimited). D-048."""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Not authenticated"}), 401
+    from ..core.housekeeping import usage
+    return jsonify(usage(user_id, fresh=request.args.get("fresh") == "1")), 200
+
+
 @auth_bp.route("/auth/me")
 def current_user_info():
     user_id = session.get("user_id")

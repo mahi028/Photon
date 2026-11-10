@@ -229,6 +229,11 @@ def create(user_id: str, spec_raw: Any, filename: str, stream, run_check: bool =
     """Store an upload (validating in the background). `stream`: binary file object."""
     from ..session import store
     spec = validate_spec(spec_raw)
+    from ..housekeeping import QuotaError, check_quota
+    try:
+        check_quota(user_id)                                # D-048
+    except QuotaError as e:
+        raise SpecError(str(e)) from None
     ext = Path(filename or "").suffix.lower()
     if ext not in WEIGHT_EXTS:
         raise SpecError(f"weights file must be one of {', '.join(WEIGHT_EXTS)}")

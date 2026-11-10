@@ -507,3 +507,24 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 - Publishing a pipeline marks its uploaded models published, so others can run it. Deleting a published model hides it but keeps the weights.
 - Uploaded models run only with `PHOTON_SANDBOX=local`: the weights stay on this host.
 - Dependencies come in the optional extra `models` (`segmentation-models-pytorch>=0.4`, which added `Segformer`, and `timm`). Use `uv sync --extra mcp --extra models`.
+
+## D-048 — Disk housekeeping, per-user quota, closed sign-up by default
+
+**Problems.**
+- Every pipeline run left its scratch folder in `volumes/tmp_exec`, holding `run.py`, `result.json` and copies of staged models and labels. 168 had piled up.
+- Nothing bounded what one user can store.
+- Batch outputs were kept forever.
+- Sign-up defaulted to open.
+
+**Decisions.**
+- **Scratch.** The executor deletes a run's scratch folder when the run ends, on every exit path. `PHOTON_KEEP_SCRATCH=1` keeps them for debugging.
+- **Sweeps.** `core/housekeeping.py` runs hourly in the process that serves requests (started on Flask's first request) and in the MCP server. It removes:
+  - `tmp_exec` entries older than 6 h (crashes, worker job folders, zip downloads);
+  - `model_ipc` `.npy` files older than 1 h;
+  - expired model grants;
+  - finished batches older than `PHOTON_BATCH_RETENTION_DAYS` (0 = keep, the default). Results and rows are deleted; source images are kept.
+- **Quota.** `PHOTON_USER_QUOTA_GB` (0 = unlimited, the default) caps uploaded images plus session outputs plus batch outputs plus saved and uploaded models.
+  - Usage comes from the database (image and model sizes) plus the user's output folders. It's cached for 60 s and refreshed after a write.
+  - Checked before anything new is written: every image upload (in `ingest_image_bytes`, which covers the web, batch upload and MCP), every session or chat or MCP run, batch creation, and model upload. Over quota gives HTTP 507 with the numbers and what to delete.
+  - `GET /auth/me/usage` returns the breakdown; the user menu shows it, with a bar when a quota is set.
+- **Sign-up** defaults to `closed`. New accounts come from `python -m src.backend.cli user add`, or by setting `PHOTON_SIGNUP=open|invite` deliberately, preferably with an allow-list. Existing accounts are unaffected.

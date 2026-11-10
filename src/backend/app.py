@@ -50,6 +50,8 @@ def create_app() -> Flask:
             threading.Thread(target=_batch.recover, name="batch-recover", daemon=True).start()
             from .core.models import user_models as _um
             threading.Thread(target=_um.recheck_stuck, name="model-recheck", daemon=True).start()
+            from .core import housekeeping as _hk
+            _hk.start()
 
     # Register blueprints
     from .api.auth_routes import auth_bp
