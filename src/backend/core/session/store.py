@@ -346,6 +346,17 @@ def init_db():
             conn.execute("ALTER TABLE batch_items ADD COLUMN preview_json TEXT")
         except Exception:
             pass
+        # Where a batch also writes its results on the server's disk (an
+        # allow-listed folder, like a Slurm job's output dir). NULL = only in Photon.
+        try:
+            conn.execute("ALTER TABLE batches ADD COLUMN output_dir TEXT")
+        except Exception:
+            pass
+        # A user's default folder for batch results (D-050); NULL = none.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN output_dir TEXT")
+        except Exception:
+            pass
 
 
 def _seed_presets(conn) -> None:
@@ -714,6 +725,17 @@ def find_user_by_provider(provider: str, provider_id: str) -> Optional[Dict[str,
         return dict(row) if row else None
 
 
+def get_user_output_dir(user_id: str) -> Optional[str]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT output_dir FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return r[0] if r else None
+
+
+def set_user_output_dir(user_id: str, output_dir: Optional[str]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET output_dir = ? WHERE user_id = ?", (output_dir, user_id))
+
+
 def update_user_login(user_id: str, last_login: str) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute(
@@ -1070,11 +1092,11 @@ def create_batch(row: Dict[str, Any], items: List[Dict[str, Any]]) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
             INSERT INTO batches (batch_id, user_id, title, source_json, graph_json, customs_json,
-                                 status, total, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 status, total, created_at, output_dir)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (row["batch_id"], row["user_id"], row["title"], json.dumps(row.get("source") or {}),
               json.dumps(row["graph"]), json.dumps(row.get("custom_nodes") or {}), row["status"],
-              len(items), row["created_at"]))
+              len(items), row["created_at"], row.get("output_dir")))
         conn.executemany("""
             INSERT INTO batch_items (batch_id, idx, image_id, filename, status) VALUES (?, ?, ?, ?, 'pending')
         """, [(row["batch_id"], i, it["image_id"], it.get("filename")) for i, it in enumerate(items)])

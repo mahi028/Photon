@@ -136,7 +136,7 @@ function apiKeys() {
     created: null,
     copied: null,
     error: '',
-    mcpUrl: window.MCP_PUBLIC_URL || `${location.protocol}//${location.hostname}:8890/mcp`,
+    mcpUrl: window.MCP_PUBLIC_URL || `${location.origin}/mcp`,
 
     async load() {
       this.loading = true;

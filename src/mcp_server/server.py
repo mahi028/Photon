@@ -793,19 +793,46 @@ def save_labels(image_id: str, data_base64: str, name: str = "labels",
 @_tool(scope="run")
 def run_batch(image_ids: list[str] | None = None, session_ids: list[str] | None = None,
               pipeline_id: str | None = None, published_id: str | None = None,
-              version: int | None = None, graph: dict | None = None, title: str | None = None) -> dict:
+              version: int | None = None, graph: dict | None = None, title: str | None = None,
+              output_dir: str | None = None) -> dict:
     """Run one pipeline over many images in the background (up to 2000). Images: image_ids
     (from upload_image) and/or every image of session_ids. Pipeline: exactly one of
     pipeline_id, published_id (+version) or graph. Returns the batch; poll get_batch.
-    Each image's numbers and tables are collected into a results table."""
+    Each image's numbers and tables are collected into a results table.
+    output_dir: an absolute folder on the Photon server's disk where the batch also writes
+    its results, like a Slurm job: <output_dir>/<title>_<id8>/ with log.txt, batch.json,
+    results.csv, tables/ and one folder of output files per image, filled in as images
+    finish. Omitted: your saved default (default_output_dir), if any. The returned
+    batch's output_dir is the job folder."""
     from src.backend.core.pipeline import batch
     uid = _uid()
     try:
         images = batch.images_for(uid, image_ids, session_ids)
         return batch.create(uid, images, title=title, pipeline_id=pipeline_id,
-                            published_id=published_id, version=version, graph=graph)
+                            published_id=published_id, version=version, graph=graph,
+                            output_dir=output_dir)
     except batch.BatchError as e:
         raise ToolError(str(e) + (f" Issues: {e.issues}" if e.issues else ""))
+
+
+@_tool(scope="run")
+def default_output_dir(path: str | None = None, clear: bool = False) -> dict:
+    """Your default folder for batch results on the Photon server's disk, used by
+    run_batch when it gets no output_dir. No arguments: show it. path: set it (an
+    absolute folder; created if missing). clear=True: no default (batches then write
+    only inside Photon unless run_batch names a folder)."""
+    from src.backend.core.pipeline import batch_export
+    uid = _uid()
+    if path and clear:
+        raise ToolError("Give path or clear, not both.")
+    try:
+        if path or clear:
+            batch_export.set_user_default(uid, None if clear else path)
+    except batch_export.ExportError as e:
+        raise ToolError(str(e))
+    roots = [str(r) for r in batch_export.roots()]
+    return {"output_dir": batch_export.user_default(uid),
+            "allowed_roots": roots or "any folder the server can write (except Photon's own)"}
 
 
 @_tool(scope="read", annotations=_RO)
@@ -992,8 +1019,8 @@ def main() -> None:
                                  description="Photon MCP server")
     ap.add_argument("--transport", choices=["stdio", "http"],
                     default=os.getenv("PHOTON_MCP_TRANSPORT", "stdio"))
-    ap.add_argument("--host", default=os.getenv("PHOTON_MCP_HOST", "0.0.0.0"))
-    ap.add_argument("--port", type=int, default=int(os.getenv("PHOTON_MCP_PORT", "8890")))
+    ap.add_argument("--host", default=config.MCP_HOST, help="default PHOTON_MCP_HOST")
+    ap.add_argument("--port", type=int, default=config.MCP_PORT, help="default PHOTON_MCP_PORT")
     args = ap.parse_args()
     _transport = args.transport
 
@@ -1008,8 +1035,8 @@ def main() -> None:
 
     # Streamable HTTP: every request needs an API key (Authorization: Bearer pk_...),
     # minted per user at /settings/api-keys in the web UI. PHOTON_MCP_USER is ignored.
-    public_url = (os.getenv("PHOTON_MCP_PUBLIC_URL")
-                  or f"http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{args.port}/mcp")
+    # Clients reach it through the proxy on PHOTON_PORT (deploy/Caddyfile).
+    public_url = os.getenv("PHOTON_MCP_PUBLIC_URL") or f"http://127.0.0.1:{config.PORT}/mcp"
     print(f"photon-mcp: streamable HTTP on {args.host}:{args.port}/mcp "
           f"(public URL {public_url}); API key required", file=sys.stderr)
     _recover_batches()

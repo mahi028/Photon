@@ -132,3 +132,39 @@ def test_batch_page_component_attribute(make_user):
     html = c.get("/batches/056e9176aa304722ac86ef0fea5a9f5f").data.decode()
     assert re.search(r"x-data='batchPage\(\"056e9176aa304722ac86ef0fea5a9f5f\"\)'", html), \
         re.findall(r"x-data=.{0,60}", html)
+
+
+@pytest.mark.slow
+def test_batch_output_dir(make_user, disk_png, tmp_path, monkeypatch):
+    """D-050: results also written to a user-chosen folder, like a Slurm job."""
+    monkeypatch.delenv("PHOTON_OUTPUT_ROOTS", raising=False)
+    monkeypatch.delenv("PHOTON_OUTPUT_DIR", raising=False)
+    c, _, _ = make_user()
+    other, _, _ = make_user()
+    assert c.get("/api/batches/output-dir").get_json()["output_dir"] is None
+    assert c.put("/api/batches/output-dir", json={"output_dir": "rel/dir"}).status_code == 400
+    saved = tmp_path / "mine"
+    r = c.put("/api/batches/output-dir", json={"output_dir": str(saved)})
+    assert r.status_code == 200 and r.get_json()["output_dir"] == str(saved.resolve())
+    assert other.get("/api/batches/output-dir").get_json()["output_dir"] is None, "per user"
+
+    ids = [i["image_id"] for i in _upload(c, disk_png)["images"]][:2]
+    b = c.post("/api/batches", json={"graph": GRAPH, "image_ids": ids, "title": "objects"}).get_json()
+    job = saved.resolve() / f"objects_{b['batch_id'][:8]}"
+    assert b["output_dir"] == str(job), "no output_dir: the saved default"
+    assert _wait(c, b["batch_id"])["status"] == "done"
+    assert {"batch.json", "log.txt", "results.csv", "all_values.csv", "tables"} <= {p.name for p in job.iterdir()}
+    item = job / "00000_a"
+    assert (item / "values.json").is_file() and any(p.suffix == ".png" for p in item.iterdir())
+    rows = list(csv.DictReader(open(job / "results.csv")))
+    assert [r["filename"] for r in rows] == ["a.png", "b.png"]
+    assert "batch done: done=2" in (job / "log.txt").read_text()
+
+    elsewhere = tmp_path / "once"
+    b2 = c.post("/api/batches", json={"graph": GRAPH, "image_ids": ids[:1], "output_dir": str(elsewhere)}).get_json()
+    assert b2["output_dir"].startswith(str(elsewhere.resolve()))
+    b3 = c.post("/api/batches", json={"graph": GRAPH, "image_ids": ids[:1], "output_dir": ""}).get_json()
+    assert b3["output_dir"] is None, "'' opts out"
+    for x in (b2, b3):
+        _wait(c, x["batch_id"])
+    assert c.put("/api/batches/output-dir", json={"output_dir": None}).get_json()["output_dir"] is None

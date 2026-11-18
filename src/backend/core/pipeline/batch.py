@@ -38,7 +38,7 @@ from typing import Any, Optional
 from ...config import config
 from ..image.thumbnail import generate_thumbnail
 from ..session import store
-from . import publishing, saved, subgraph
+from . import batch_export, publishing, saved, subgraph
 
 MAX_ITEMS = int(os.getenv("PHOTON_BATCH_MAX_IMAGES", "2000"))
 MAX_ACTIVE_PER_USER = 3
@@ -131,9 +131,12 @@ def images_for(user_id: str, image_ids: list[str] | None = None,
     return out
 
 
-def create(user_id: str, images: list[dict], title: str | None = None, **source) -> dict:
+def create(user_id: str, images: list[dict], title: str | None = None,
+           output_dir: str | None = None, **source) -> dict:
     """Validate, store and start a batch. `source`: pipeline_id | published_id
-    (+version) | graph. Returns the batch."""
+    (+version) | graph. `output_dir`: also write results into a folder on the
+    server's disk (default: the user's saved folder), see batch_export.
+    Returns the batch."""
     if not images:
         raise BatchError("No images.")
     from ..housekeeping import QuotaError, check_quota
@@ -155,11 +158,25 @@ def create(user_id: str, images: list[dict], title: str | None = None, **source)
     frozen = {cid: {k: cn[k] for k in ("custom_node_id", "name", "code", "ports", "params", "doc")
                     if k in cn}
               for cid, cn in customs.items() if cid in used}
+    try:
+        export_parent = batch_export.resolve(output_dir, user_id)
+    except batch_export.ExportError as e:
+        raise BatchError(str(e))
     bid = uuid.uuid4().hex
     row = {"batch_id": bid, "user_id": user_id, "title": (title or src_title or "batch").strip()[:200],
            "source": src, "graph": graph, "custom_nodes": frozen, "status": "queued",
            "created_at": _now()}
+    if export_parent:
+        row["output_dir"] = str(batch_export.job_dir(export_parent, row["title"], bid))
     store.create_batch(row, images)
+    if export_parent:
+        b = store.get_batch(bid)
+        try:
+            batch_export.write_manifest(b, store.list_batch_items(bid))
+            batch_export.log(b, f"batch {bid} queued: {len(images)} images, pipeline {src}")
+        except OSError as e:
+            store.delete_batch(bid, user_id)
+            raise BatchError(f"Can't write to output_dir: {e}")
     start(bid)
     return public(store.get_batch(bid))
 
@@ -250,6 +267,9 @@ def start(batch_id: str) -> None:
         return
     store.update_batch(batch_id, status="running", runner_pid=os.getpid(),
                        started_at=b["started_at"] or _now())
+    if b.get("output_dir"):
+        _export_safe(batch_id, lambda bb: batch_export.log(
+            bb, f"running in pid {os.getpid()}: {len(store.list_batch_items(batch_id, ['pending']))} images to do"))
     try:
         run_graph, customs, outer = subgraph.expand(b["graph"], b["user_id"], b["custom_nodes"])
     except subgraph.SubgraphError as e:
@@ -276,7 +296,40 @@ def _run_item_safe(batch_id: str, idx: int, image_id: str) -> None:
     except Exception as e:                       # never lose an item to a bug
         store.update_batch_item(batch_id, idx, status="failed", error=f"internal error: {e}")
     finally:
+        _export_item(batch_id, idx)
         _finish_if_done(batch_id)
+
+
+def _export_safe(batch_id: str, fn) -> None:
+    """Run an export step; a full disk or a removed folder never fails the batch."""
+    b = store.get_batch(batch_id)
+    if not b or not b.get("output_dir"):
+        return
+    try:
+        fn(b)
+    except Exception as e:
+        try:
+            batch_export.log(b, f"export error: {e}")
+        except Exception:
+            pass
+
+
+def _export_item(batch_id: str, idx: int) -> None:
+    def go(b):
+        it = next((i for i in store.list_batch_items(batch_id) if i["idx"] == idx), None)
+        if it and it["status"] in ("done", "failed", "cancelled"):
+            batch_export.export_item(b, it, batch_dir(batch_id))
+    _export_safe(batch_id, go)
+
+
+def _export_finish(batch_id: str) -> None:
+    def go(b):
+        items = store.list_batch_items(batch_id)
+        uid = b["user_id"]
+        tables = {t["key"]: table_csv(uid, batch_id, t["key"]) for t in table_keys(items)}
+        batch_export.finish(b, items, values_csv(uid, batch_id),
+                            values_csv(uid, batch_id, all_values=True), tables)
+    _export_safe(batch_id, go)
 
 
 def _run_item(batch_id: str, idx: int, image_id: str) -> None:
@@ -381,6 +434,7 @@ def _finish_if_done(batch_id: str) -> None:
                        finished_at=_now())
     with _ctx_lock:
         _ctx.pop(batch_id, None)
+    _export_finish(batch_id)
 
 
 def cancel(user_id: str, batch_id: str) -> dict:
@@ -460,7 +514,8 @@ def public(b: dict) -> dict:
             "failed": c.get("failed", 0), "cancelled": c.get("cancelled", 0),
             "running": c.get("running", 0), "pending": c.get("pending", 0),
             "created_at": b["created_at"], "started_at": b["started_at"],
-            "finished_at": b["finished_at"], "cancel_requested": b["cancel_requested"]}
+            "finished_at": b["finished_at"], "cancel_requested": b["cancel_requested"],
+            "output_dir": b.get("output_dir")}
 
 
 def get(user_id: str, batch_id: str, with_items: bool = True) -> dict:

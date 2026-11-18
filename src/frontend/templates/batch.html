@@ -39,6 +39,8 @@
             <div class="h-full bg-indigo-500 transition-all" :style="`width: ${100 * b.done / Math.max(1, b.total)}%`"></div>
             <div class="h-full bg-red-500 transition-all" :style="`width: ${100 * b.failed / Math.max(1, b.total)}%`"></div>
           </div>
+          <div x-show="b.output_dir" class="text-xs text-gray-400">Writing results to
+            <code class="font-mono text-gray-200 select-all break-all" x-text="b.output_dir"></code></div>
           <div class="flex flex-wrap gap-2 pt-1">
             <a :href="`/api/batches/${id}/values.csv`" class="btn-secondary text-xs" title="Result values: nodes nothing else reads">Values CSV</a>
             <a x-show="(b.all_columns || []).length > (b.columns || []).length" :href="`/api/batches/${id}/values.csv?all=1`"

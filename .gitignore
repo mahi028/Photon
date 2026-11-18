@@ -367,3 +367,6 @@ vite.config.ts.timestamp-*
 # Volumes
 volumes
 src/frontend/static/css/output.css
+
+# Docker compose settings (docker/photon.env.example is the template)
+docker/photon.env

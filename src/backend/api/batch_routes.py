@@ -49,10 +49,34 @@ def create_batch():
         images = batch.images_for(uid, data.get("image_ids"), data.get("session_ids"))
         b = batch.create(uid, images, title=data.get("title"),
                          pipeline_id=data.get("pipeline_id"), published_id=data.get("published_id"),
-                         version=_int(data.get("version")), graph=data.get("graph"))
+                         version=_int(data.get("version")), graph=data.get("graph"),
+                         output_dir=data.get("output_dir"))
     except batch.BatchError as e:
         return _err(e)
     return jsonify(b), 201
+
+
+@batch_bp.route("/batches/output-dir", methods=["GET"])
+@login_required
+def get_output_dir():
+    """Your default folder for batch results (D-050); null = none."""
+    from ..core.pipeline import batch_export
+    uid = get_current_user_id()
+    return jsonify({"output_dir": batch_export.user_default(uid),
+                    "roots": [str(r) for r in batch_export.roots()]})
+
+
+@batch_bp.route("/batches/output-dir", methods=["PUT"])
+@login_required
+def set_output_dir():
+    """Save (or clear with null / "") your default folder for batch results."""
+    from ..core.pipeline import batch_export
+    data = request.get_json(silent=True) or {}
+    try:
+        value = batch_export.set_user_default(get_current_user_id(), data.get("output_dir"))
+    except batch_export.ExportError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"output_dir": value})
 
 
 @batch_bp.route("/batches/upload", methods=["POST"])

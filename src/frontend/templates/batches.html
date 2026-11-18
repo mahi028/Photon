@@ -95,6 +95,19 @@
                  class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500" />
         </label>
 
+        <div class="flex flex-col gap-1">
+          <span class="text-xs text-gray-400">Also write results to a folder on the server (optional)</span>
+          <div class="flex gap-2">
+            <input x-model="outputDir" type="text" maxlength="1000" placeholder="/absolute/path/on/the/server — empty: keep results in Photon only"
+                   class="flex-1 min-w-0 bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500" />
+            <button @click="saveDefault()" :disabled="outputDir.trim() === (savedDir || '')" class="btn-secondary text-xs disabled:opacity-50 shrink-0"
+                    x-text="outputDir.trim() ? 'Save as my default' : 'Clear my default'"></button>
+          </div>
+          <span class="text-[11px] text-gray-500">Each batch writes <code>&lt;folder&gt;/&lt;name&gt;_&lt;id&gt;/</code>: log.txt, results.csv, tables/ and each image's outputs, as images finish.
+            <span x-show="roots.length" x-text="'Allowed: ' + roots.join(', ')"></span>
+            <span x-show="dirMsg" x-text="dirMsg" :class="dirErr ? 'text-red-400' : 'text-emerald-400'"></span></span>
+        </div>
+
         <div class="flex items-center gap-3">
           <button @click="start()" :disabled="busy || !source || (mode === 'upload' ? !files.length : !pickedSessions.length)"
                   class="btn-primary text-sm disabled:opacity-50" x-text="busy ? status : 'Start batch'"></button>
@@ -143,7 +156,7 @@ function batchesPage() {
     source: params.get('pipeline_id') ? 'p:' + params.get('pipeline_id')
           : (params.get('published_id') ? 'pub:' + params.get('published_id') : ''),
     version: params.get('version') ? Number(params.get('version')) : null,
-    mode: 'upload', files: [], pickedSessions: [], title: '', dragging: false,
+    mode: 'upload', files: [], pickedSessions: [], title: '', outputDir: '', savedDir: null, roots: [], dirMsg: '', dirErr: false, dragging: false,
     busy: false, status: '', uploadDone: 0, uploadTotal: 0, skipped: [], error: '',
 
     get mine() { return this.all.filter(p => !p.is_preset); },
@@ -157,6 +170,20 @@ function batchesPage() {
       if (s.ok) this.sessions = await s.json();
       if (b.ok) this.batches = (await b.json()).batches;
       if (this.batches.some(x => ['queued', 'running'].includes(x.status))) setTimeout(() => this.refresh(), 3000);
+      const od = await fetch('/api/batches/output-dir');
+      if (od.ok) {
+        const d = await od.json();
+        this.savedDir = d.output_dir; this.roots = d.roots || []; this.outputDir = d.output_dir || '';
+      }
+    },
+
+    async saveDefault() {
+      const res = await fetch('/api/batches/output-dir', {method: 'PUT', headers: {'Content-Type': 'application/json'},
+                                                          body: JSON.stringify({output_dir: this.outputDir.trim() || null})});
+      const d = await res.json().catch(() => ({}));
+      this.dirErr = !res.ok;
+      if (res.ok) { this.savedDir = d.output_dir; this.outputDir = d.output_dir || ''; }
+      this.dirMsg = res.ok ? (d.output_dir ? 'Saved as your default.' : 'Default cleared.') : (d.error || 'Could not save.');
     },
 
     async refresh() {
@@ -204,7 +231,7 @@ function batchesPage() {
     async start() {
       this.busy = true; this.error = ''; this.skipped = [];
       try {
-        const body = {title: this.title.trim() || null};
+        const body = {title: this.title.trim() || null, output_dir: this.outputDir.trim()};
         if (this.source.startsWith('pub:')) {
           body.published_id = this.source.slice(4);
           if (this.version && params.get('published_id') === body.published_id) body.version = this.version;

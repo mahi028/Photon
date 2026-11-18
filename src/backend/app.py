@@ -137,6 +137,11 @@ def create_app() -> Flask:
         from flask import render_template
         return render_template("api_keys.html", mcp_public_url=config.MCP_PUBLIC_URL)
 
+    @app.route("/healthz")
+    def healthz():
+        """Liveness for container health checks: no login, no database work."""
+        return {"ok": True}, 200
+
     @app.route("/models")
     @login_required
     def seg_models_view():

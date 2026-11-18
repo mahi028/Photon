@@ -114,9 +114,18 @@ class Config:
     GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
     GOOGLE_OAUTH_ENABLED: bool = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
+    # ---- Ports (D-051) ----
+    # One public port (Caddy, deploy/Caddyfile) in front of two local backends:
+    # /mcp goes to the MCP server, everything else to the web app.
+    PORT: int = int(os.getenv("PHOTON_PORT", "8890"))
+    WEB_HOST: str = os.getenv("PHOTON_WEB_HOST", "127.0.0.1")
+    WEB_PORT: int = int(os.getenv("PHOTON_WEB_PORT", "10000"))
+    MCP_HOST: str = os.getenv("PHOTON_MCP_HOST", "127.0.0.1")
+    MCP_PORT: int = int(os.getenv("PHOTON_MCP_PORT", "10001"))
+
     # ---- MCP server ----
     # Externally reachable MCP endpoint (e.g. behind a port-forward/proxy), shown
-    # on the API keys page. Empty = derived in the browser as <page host>:8890/mcp.
+    # on the API keys page. Empty = the page's own origin + /mcp (same port behind Caddy).
     MCP_PUBLIC_URL: str = os.getenv("PHOTON_MCP_PUBLIC_URL", "")
 
     # ---- Volume paths (relative to project root) ----

@@ -11,8 +11,10 @@ from src.backend.app import create_app
 app = create_app()
 
 if __name__ == "__main__":
+    from src.backend.config import config
+    # Dev server; production: `gunicorn src.backend.wsgi:app` (gunicorn.conf.py).
     app.run(
-        host="0.0.0.0",
-        port=8889,
+        host=config.WEB_HOST,
+        port=config.WEB_PORT,
         debug=True,
     )
