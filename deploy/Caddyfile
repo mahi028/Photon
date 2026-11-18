@@ -1,0 +1,35 @@
+# Photon behind one port: Caddy on PHOTON_PORT sends MCP traffic to the MCP
+# server and everything else to the web app. Ports come from .env (D-051):
+#
+#   PHOTON_PORT       public port (Caddy)            default 8890
+#   PHOTON_WEB_PORT   web app (gunicorn), localhost  default 10000
+#   PHOTON_MCP_PORT   MCP server (HTTP), localhost   default 10001
+#
+# Run from the repo root:
+#   caddy run --config deploy/Caddyfile --adapter caddyfile --envfile .env
+# (Docker sets PHOTON_WEB_UPSTREAM / PHOTON_MCP_UPSTREAM to the service names.)
+
+{
+	admin off          # no admin API on a shared box; restart Caddy to reload
+	auto_https off     # plain HTTP on the internal network
+}
+
+:{$PHOTON_PORT:8890} {
+	# MCP endpoint and its OAuth protected-resource metadata
+	@mcp path /mcp /mcp/* /.well-known/oauth-protected-resource/mcp /.well-known/oauth-protected-resource/mcp/*
+	handle @mcp {
+		reverse_proxy {$PHOTON_MCP_UPSTREAM:127.0.0.1}:{$PHOTON_MCP_PORT:10001} {
+			# The MCP server, bound to 127.0.0.1, only accepts localhost Host
+			# headers (DNS-rebinding guard): present the upstream's address.
+			header_up Host {upstream_hostport}
+			flush_interval -1      # stream responses (SSE) without buffering
+		}
+	}
+
+	# Everything else: web UI + REST API (run progress uses SSE too)
+	handle {
+		reverse_proxy {$PHOTON_WEB_UPSTREAM:127.0.0.1}:{$PHOTON_WEB_PORT:10000} {
+			flush_interval -1
+		}
+	}
+}

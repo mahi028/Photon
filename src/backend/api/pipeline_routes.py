@@ -19,8 +19,8 @@ from flask import Blueprint, jsonify, request
 from ..config import config
 from ..core.auth.middleware import get_current_user_id, login_required
 from ..core.image.thumbnail import generate_thumbnail
-from ..core.pipeline import registry, runner
-from ..core.pipeline.executor import run_pipeline_subprocess
+from ..core.pipeline import publishing, registry, runner, saved, subgraph
+from ..core.sandbox import backend as sandbox_backend
 from ..core.sandbox.subprocess_executor import ASTSecurityError, _check_ast_safety
 from ..core.session import store
 from ..core.session.manager import get_manager
@@ -36,14 +36,33 @@ pipeline_bp = Blueprint("pipelines", __name__)
 @pipeline_bp.route("/ops", methods=["GET"])
 @login_required
 def list_ops():
-    """Registry catalog + port types + coercion table (editor palette)."""
-    cat = registry.catalog()
+    """Registry catalog + port types + coercion table (editor palette).
+    ?library=1 also includes every library op (several hundred, ~600 KB);
+    the editor uses /ops/library instead."""
+    cat = registry.catalog(include_library=request.args.get("library") == "1")
     cat["custom_nodes"] = [
         {"custom_node_id": cn["custom_node_id"], "name": cn["name"],
          "ports": cn["ports"], "params": cn["params"], "doc": cn["doc"]}
         for cn in store.list_custom_nodes(get_current_user_id())
     ]
     return jsonify(cat), 200
+
+
+@pipeline_bp.route("/ops/library", methods=["GET"])
+@login_required
+def library_ops():
+    """Library ops (D-041). ?q=<terms> ranks matches (limit <= 100);
+    ?names=lib:a,lib:b returns those specs (unknown names are skipped)."""
+    from ..core.pipeline import library
+    names = [n for n in (request.args.get("names") or "").split(",") if n.strip()]
+    if names:
+        specs = [library.get(n.strip()) for n in names[:200]]
+        return jsonify({"ops": [s.to_dict() for s in specs if s]}), 200
+    q = (request.args.get("q") or "").strip()
+    limit = max(1, min(100, _int_or_none(request.args.get("limit")) or 40))
+    found = library.search(q, limit) if q else []
+    return jsonify({"ops": [s.to_dict() for s in found],
+                    "total": len(library.all_specs())}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +72,10 @@ def list_ops():
 @pipeline_bp.route("/pipelines", methods=["GET"])
 @login_required
 def list_pipelines():
-    return jsonify(store.list_pipelines(get_current_user_id())), 200
+    out = store.list_pipelines(get_current_user_id())
+    for p in out:
+        p["publication"] = None if p["is_preset"] else publishing.publication_for(p["pipeline_id"])
+    return jsonify(out), 200
 
 
 @pipeline_bp.route("/pipelines", methods=["POST"])
@@ -98,6 +120,7 @@ def get_pipeline(pipeline_id: str):
     p = _owned_pipeline(pipeline_id, get_current_user_id(), for_write=False)
     if not p:
         return jsonify({"error": "Pipeline not found"}), 404
+    p["publication"] = None if p["is_preset"] else publishing.publication_for(pipeline_id)
     return jsonify(p), 200
 
 
@@ -135,8 +158,104 @@ def validate_pipeline():
     graph = data.get("graph") or {}
     customs = {cn["custom_node_id"]: cn
                for cn in store.list_custom_nodes(get_current_user_id())}
-    issues = runner.validate(graph, custom_nodes=customs)
+    issues = subgraph.validate(graph, customs, get_current_user_id())
     return jsonify({"valid": not issues, "issues": [i.to_dict() for i in issues]}), 200
+
+
+# ---------------------------------------------------------------------------
+# Published pipelines (instance-wide, versioned — D-035)
+# ---------------------------------------------------------------------------
+
+def _int_or_none(v):
+    try:
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _publish_error(e: "publishing.PublishError"):
+    body = {"error": str(e)}
+    if e.issues:
+        body["issues"] = e.issues
+    return jsonify(body), e.status
+
+
+@pipeline_bp.route("/pipelines/<pipeline_id>/publish", methods=["POST"])
+@login_required
+def publish_pipeline(pipeline_id: str):
+    """Publish the saved state of one of your pipelines as its next version."""
+    data = request.get_json(silent=True) or {}
+    try:
+        res = publishing.publish(get_current_user_id(), pipeline_id, data.get("changelog") or "",
+                                 thumbnail=data.get("thumbnail", True) is not False)
+    except publishing.PublishError as e:
+        return _publish_error(e)
+    return jsonify(res), 201 if res["created"] else 200
+
+
+@pipeline_bp.route("/published", methods=["GET"])
+@login_required
+def list_published():
+    return jsonify(publishing.list_public(get_current_user_id(), request.args.get("q"))), 200
+
+
+@pipeline_bp.route("/published/<published_id>", methods=["GET"])
+@login_required
+def get_published(published_id: str):
+    d = publishing.get(get_current_user_id(), published_id,
+                       _int_or_none(request.args.get("version")))
+    if not d:
+        return jsonify({"error": "Published pipeline not found"}), 404
+    return jsonify(d), 200
+
+
+@pipeline_bp.route("/published/<published_id>/node", methods=["GET"])
+@login_required
+def published_as_node(published_id: str):
+    """Ports and overridable params of a published version used as a node
+    (D-045). ?version= pins it; default the latest."""
+    user_id = get_current_user_id()
+    d = publishing.get(user_id, published_id, _int_or_none(request.args.get("version")))
+    if not d:
+        return jsonify({"error": "Published pipeline not found"}), 404
+    try:
+        itf = subgraph.interface(d, user_id)
+    except subgraph.SubgraphError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({k: v for k, v in itf.items() if not k.startswith("_")}), 200
+
+
+@pipeline_bp.route("/published/<published_id>/thumbnail", methods=["GET"])
+@login_required
+def published_thumbnail(published_id: str):
+    """Card image: the author's latest output of the published graph (#8)."""
+    from flask import send_file
+    path = publishing.thumbnail_for(get_current_user_id(), published_id)
+    if not path:
+        return jsonify({"error": "No thumbnail"}), 404
+    resp = send_file(path, mimetype="image/jpeg", max_age=3600)
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    return resp
+
+
+@pipeline_bp.route("/published/<published_id>/unpublish", methods=["POST"])
+@login_required
+def unpublish_pipeline(published_id: str):
+    if not publishing.unpublish(get_current_user_id(), published_id):
+        return jsonify({"error": "Published pipeline not found"}), 404
+    return jsonify({"status": "unpublished"}), 200
+
+
+@pipeline_bp.route("/published/<published_id>/fork", methods=["POST"])
+@login_required
+def fork_published(published_id: str):
+    data = request.get_json(silent=True) or {}
+    try:
+        res = publishing.fork(get_current_user_id(), published_id,
+                              _int_or_none(data.get("version")), data.get("title"))
+    except publishing.PublishError as e:
+        return _publish_error(e)
+    return jsonify(res), 201
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +284,7 @@ def create_custom_node():
         return jsonify({"error": "ports must declare inputs and outputs"}), 400
 
     try:
-        _check_ast_safety(code)
+        _check_ast_safety(code, strict_io=True)
     except (ASTSecurityError, SyntaxError) as e:
         return jsonify({"error": f"Rejected by sandbox policy: {e}"}), 400
     if "def node(" not in code:
@@ -205,30 +324,58 @@ def _finish(session_id: str) -> None:
 
 
 def run_pipeline_for_session(session_id: str, graph: dict, title: str,
-                             user_id: str, source_turn_index: int | None = None) -> dict:
+                             user_id: str, source_turn_index: int | None = None,
+                             emit=None, custom_nodes: dict | None = None,
+                             provenance: dict | None = None,
+                             manage_status: bool = True) -> dict:
     """Execute a graph against every image attached to a session.
 
     Shared by POST /sessions/<id>/run-pipeline and the LLM loop's
     response_type="pipeline" path. Streams node progress over the session's
     SSE queue and persists finals as GeneratedImages (D-025 linkage kept via
     source_turn_index).
+
+    emit: optional callable(event_dict) replacing the SSE push — used by the
+    MCP server, which has no browser stream to feed.
+    custom_nodes: resolve custom_node_ids from this dict instead of the
+    runner's own library — a published pipeline's frozen snapshot (D-035).
+    provenance: extra keys recorded with each output (e.g. published_id/version).
+    manage_status: claim the session (idle -> running) for the run and release
+    it after. False when the caller already holds it (the LLM loop).
     """
+    push = emit or (lambda ev: _push(session_id, ev))
     manager = get_manager()
     sess = manager.get_session_for_user(session_id, user_id)
     if not sess:
         return {"error": "Session not found"}
+    from ..core.housekeeping import QuotaError, check_quota
+    try:
+        check_quota(user_id)                                # D-048
+    except QuotaError as e:
+        return {"error": str(e)}
 
     from .upload_routes import get_image_registry
     registry_images = get_image_registry()
 
-    customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
-    issues = runner.validate(graph, custom_nodes=customs)
+    customs = custom_nodes if custom_nodes is not None else {
+        cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
+    # Published pipelines used as nodes run as their (pinned) inner graphs (D-045).
+    try:
+        run_graph, customs, outer = subgraph.expand(graph, user_id, customs)
+    except subgraph.SubgraphError as e:
+        return {"error": "Pipeline is invalid", "issues": [{"node_id": e.node_id, "message": str(e),
+                                                             "severity": "error"}]}
+    issues = subgraph.map_issues(runner.validate(run_graph, custom_nodes=customs), graph)
     if issues:
         return {"error": "Pipeline is invalid", "issues": [i.to_dict() for i in issues]}
+    provenance_json = json.dumps({**provenance, "graph": graph} if provenance else graph, indent=2)
 
-    manager.set_status(session_id, "running")
+    if manage_status and not manager.try_start_run(session_id):
+        return {"error": "Session is already running"}
     run_id = uuid.uuid4().hex[:8]
     outputs_made: list[dict] = []
+    values_by_slot: dict[int, dict] = {}   # non-image outputs (numbers, tables...)
+    models_saved: list[dict] = []           # ml_save_model results (D-044)
     last_error = None
 
     try:
@@ -239,18 +386,37 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
 
             out_dir = config.OUTPUTS_DIR / session_id / f"pipe{run_id}" / f"slot{slot_idx}"
             node_dir = out_dir / "nodes"
-            _push(session_id, {"event": "pipeline_start", "image_slot": slot_idx,
-                               "image_id": image_id, "title": title,
-                               "node_count": len(graph.get("nodes") or [])})
+            push({"event": "pipeline_start", "image_slot": slot_idx,
+                  "image_id": image_id, "title": title,
+                  "node_count": len(graph.get("nodes") or [])})
 
-            result = run_pipeline_subprocess(
-                graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
-                input_mode="RGB" if meta.channel_count >= 3 else "L",
-            )
+            from ..core.models import user_models
+            try:
+                assets = saved.stage(run_graph, user_id, image_id, (meta.shape[1], meta.shape[0]))
+                grants = user_models.issue_grants(run_graph, user_id)
+            except (saved.AssetError, user_models.SpecError) as e:
+                last_error = str(e)
+                push({"event": "pipeline_error", "image_slot": slot_idx,
+                      "failed_node": None, "message": last_error})
+                continue
+            try:
+                result = sandbox_backend.run_pipeline(
+                    run_graph, meta.path, str(out_dir), str(node_dir), custom_nodes=customs,
+                    input_mode="RGB" if meta.channel_count >= 3 else "L", assets=assets,
+                    model_grants=grants,
+                )
+            finally:
+                user_models.revoke_grants(grants)
+            for m in saved.register_saved(user_id, result.get("saved_models") or [],
+                                          session_id, title):
+                models_saved.append({**m, "image_slot": slot_idx})
+                push({"event": "model_saved", "image_slot": slot_idx, "model": m})
 
+            if outer:
+                subgraph.collapse(result, outer)
             for ev in result.get("events", []):
-                _push(session_id, {"event": f"node_{ev['phase']}", "node_id": ev["node_id"],
-                                   "image_slot": slot_idx, "message": ev.get("message")})
+                push({"event": f"node_{ev['phase']}", "node_id": ev["node_id"],
+                      "image_slot": slot_idx, "message": ev.get("message")})
 
             previews_rel = {}
             for nid, info in (result.get("previews") or {}).items():
@@ -260,14 +426,18 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                 except ValueError:
                     pass
             if previews_rel:
-                _push(session_id, {"event": "node_previews", "image_slot": slot_idx,
-                                   "previews": previews_rel})
+                push({"event": "node_previews", "image_slot": slot_idx,
+                      "previews": previews_rel})
+            if result.get("values"):
+                values_by_slot[slot_idx] = result["values"]
+                push({"event": "node_values", "image_slot": slot_idx,
+                      "values": result["values"]})
 
             if result.get("error"):
                 last_error = result["error"]
-                _push(session_id, {"event": "pipeline_error", "image_slot": slot_idx,
-                                   "failed_node": result.get("failed_node"),
-                                   "message": result["error"]})
+                push({"event": "pipeline_error", "image_slot": slot_idx,
+                      "failed_node": result.get("failed_node"),
+                      "message": result["error"]})
                 continue
 
             for final in result.get("finals", []):
@@ -279,14 +449,14 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                     preview_path = None
 
                 image_out_id = uuid.uuid4().hex
-                description = f"pipeline_{title}_slot{slot_idx}_{final['node_id']}"
+                description = f"pipeline_{title}_slot{slot_idx}_{final['node_id'].replace('/', '~')}"
                 manager.add_output(session_id, GeneratedImage(
                     image_id=image_out_id,
                     session_id=session_id,
                     description=description,
                     path=str(out_path),
                     preview_path=str(preview_path) if preview_path and preview_path.exists() else "",
-                    code=json.dumps(graph, indent=2),   # graph IS the provenance
+                    code=provenance_json,   # graph IS the provenance
                     source_turn_index=source_turn_index,
                     produced_at=datetime.utcnow(),
                     source_iteration=slot_idx,
@@ -299,11 +469,13 @@ def run_pipeline_for_session(session_id: str, graph: dict, title: str,
                 out_info = {"image_id": image_out_id, "description": description,
                             "preview_url": preview_url, "image_slot": slot_idx}
                 outputs_made.append(out_info)
-                _push(session_id, {"event": "output_saved", **out_info})
+                push({"event": "output_saved", **out_info})
     finally:
-        manager.set_status(session_id, "idle")
+        if manage_status:
+            manager.set_status(session_id, "idle")
 
-    return {"error": last_error, "outputs": outputs_made, "run_id": run_id}
+    return {"error": last_error, "outputs": outputs_made, "run_id": run_id,
+            "values": values_by_slot, "saved_models": models_saved}
 
 
 @pipeline_bp.route("/sessions/<session_id>/run-pipeline", methods=["POST"])
@@ -322,18 +494,32 @@ def run_pipeline_route(session_id: str):
     data = request.get_json(force=True)
     graph = data.get("graph")
     title = (data.get("title") or "adhoc").strip()
+    customs = None
+    provenance = None
 
-    if data.get("pipeline_id"):
+    if data.get("published_id"):
+        try:
+            graph, customs, title, provenance = publishing.resolve_for_run(
+                user_id, data["published_id"], _int_or_none(data.get("version")))
+        except publishing.PublishError as e:
+            return jsonify({"error": str(e)}), e.status
+    elif data.get("pipeline_id"):
         p = _owned_pipeline(data["pipeline_id"], user_id, for_write=False)
         if not p:
             return jsonify({"error": "Pipeline not found"}), 404
         graph, title = p["graph"], p["title"]
 
     if not graph:
-        return jsonify({"error": "pipeline_id or graph is required"}), 400
+        return jsonify({"error": "pipeline_id, published_id or graph is required"}), 400
 
-    customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
-    issues = runner.validate(graph, custom_nodes=customs)
+    if customs is None:
+        customs = {cn["custom_node_id"]: cn for cn in store.list_custom_nodes(user_id)}
+    from ..core.housekeeping import QuotaError, check_quota
+    try:
+        check_quota(user_id)
+    except QuotaError as e:
+        return jsonify({"error": str(e)}), e.status
+    issues = subgraph.validate(graph, customs, user_id)
     if issues:
         return jsonify({"error": "Pipeline is invalid",
                         "issues": [i.to_dict() for i in issues]}), 400
@@ -344,7 +530,8 @@ def run_pipeline_route(session_id: str):
 
     def _worker():
         try:
-            run_pipeline_for_session(session_id, graph, title, user_id)
+            run_pipeline_for_session(session_id, graph, title, user_id,
+                                     custom_nodes=customs, provenance=provenance)
         finally:
             _finish(session_id)
 

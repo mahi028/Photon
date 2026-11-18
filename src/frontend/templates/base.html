@@ -27,6 +27,8 @@
   <!-- Shared rendering engine (registers x-markdown / x-highlight Alpine directives) -->
   <script src="{{ url_for('static', filename='js/markdownRenderer.js') }}"></script>
 
+  <!-- App-wide dialogs/toasts store; must register before Alpine starts -->
+  <script src="{{ url_for('static', filename='js/ui.js') }}"></script>
   <!-- Alpine.js (no build step) -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
@@ -37,6 +39,8 @@
 </head>
 <body class="min-h-screen bg-gray-950 text-gray-100 font-sans">
   {% block content %}{% endblock %}
+
+  {% include "partials/ui_dialogs.html" %}
 
   {% block scripts %}{% endblock %}
 </body>

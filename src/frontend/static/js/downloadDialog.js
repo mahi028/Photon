@@ -53,7 +53,7 @@ function downloadDialog() {
 
         if (!res.ok) {
           const data = await res.json();
-          alert(`Download failed: ${data.error || 'Unknown error'}`);
+          window.ui.toast(`Download failed: ${data.error || 'Unknown error'}`, 'error');
           return;
         }
 
@@ -69,7 +69,7 @@ function downloadDialog() {
 
         this.$store.downloadDialog.close();
       } catch (e) {
-        alert(`Download error: ${e.message}`);
+        window.ui.toast(`Download error: ${e.message}`, 'error');
       } finally {
         this.downloading = false;
       }

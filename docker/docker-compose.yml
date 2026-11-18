@@ -1,16 +1,102 @@
+# Photon: web app + MCP server behind Caddy on one port (+ optional gVisor
+# sandbox worker, separate file).
+#
+#   cd docker
+#   cp photon.env.example photon.env      # then set PHOTON_DATA_DIR etc.
+#   docker compose --env-file ../.env --env-file photon.env up -d --build
+#
+# Ports live in ../.env (D-051): PHOTON_PORT is the only published one (Caddy);
+# Caddy sends /mcp to photon-mcp:PHOTON_MCP_PORT and the rest to
+# photon:PHOTON_WEB_PORT. App settings/secrets also come from ../.env
+# (FLASK_SECRET_KEY must be set). See docker/README.md.
+
+x-photon: &photon
+  image: photon:latest
+  env_file:
+    - path: ../.env
+      required: false
+  environment: &env
+    # The data folder is mounted at the SAME absolute path as on the host:
+    # the database stores absolute paths of uploads/outputs/models.
+    PHOTON_VOLUMES_DIR: ${PHOTON_DATA_DIR:?set PHOTON_DATA_DIR to an absolute path}
+    PHOTON_NO_DOTENV: "1"
+    FLASK_ENV: production
+    # inside a container the backends must listen beyond localhost (only
+    # Caddy, on the compose network, reaches them; their ports aren't published)
+    PHOTON_WEB_HOST: 0.0.0.0
+    PHOTON_MCP_HOST: 0.0.0.0
+    # model download caches (DINOv2 via torch hub, timm) persist with the data
+    TORCH_HOME: ${PHOTON_DATA_DIR}/cache/torch
+    HF_HOME: ${PHOTON_DATA_DIR}/cache/huggingface
+    MODEL_SIDECAR_IDLE_EXIT_SECONDS: ${MODEL_SIDECAR_IDLE_EXIT_SECONDS:-86400}
+  # Run as the owner of the data folder so files stay editable on the host.
+  user: "${PHOTON_UID:-1000}:${PHOTON_GID:-1000}"
+  volumes:
+    - ${PHOTON_DATA_DIR}:${PHOTON_DATA_DIR}
+  shm_size: 2g
+  restart: unless-stopped
+  deploy:
+    resources:
+      reservations:
+        devices:                      # remove this block on a CPU-only host
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
 services:
   photon:
+    <<: *photon
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: photon-app
-    ports:
-      - "8889:5000"
-    volumes:
-      # Mount the volumes directory to persist uploaded/generated images
-      - ../volumes:/app/volumes
-    env_file:
-      - ../.env
+
+  # Same image, MCP over streamable HTTP (API keys from the web UI). It shares
+  # the data folder, the database and the model sidecar's Unix socket with the
+  # app container; batches started over MCP run here.
+  photon-mcp:
+    <<: *photon
+    container_name: photon-mcp
+    command: ["python", "-m", "src.mcp_server", "--transport", "http"]
     environment:
-      - FLASK_ENV=production
+      <<: *env
+      PHOTON_MCP_PUBLIC_URL: ${PHOTON_MCP_PUBLIC_URL:-}
+      # Host folders MCP clients may read with upload_images(paths=...):
+      # mounted read-only below at the same paths. Empty = paths disabled.
+      PHOTON_MCP_PATH_ROOTS: ${PHOTON_MCP_PATH_ROOTS:-}
+    volumes:
+      - ${PHOTON_DATA_DIR}:${PHOTON_DATA_DIR}
+      # default: an (empty) inbox inside the data folder
+      - ${PHOTON_MCP_READ_DIR:-${PHOTON_DATA_DIR}/mcp_inbox}:${PHOTON_MCP_READ_DIR:-${PHOTON_DATA_DIR}/mcp_inbox}:ro
+    depends_on:
+      photon:
+        condition: service_healthy
+    healthcheck:
+      # /mcp answers 401 without an API key: any HTTP answer means it's up.
+      test: ["CMD", "python", "-c", "import os,urllib.request,urllib.error,sys\ntry: urllib.request.urlopen(f\"http://127.0.0.1:{os.environ['PHOTON_MCP_PORT']}/mcp\", timeout=4)\nexcept urllib.error.HTTPError: sys.exit(0)\nexcept Exception: sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  # The one public port: /mcp -> photon-mcp, everything else -> photon.
+  caddy:
+    image: caddy:2.8.4-alpine
+    container_name: photon-caddy
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      PHOTON_PORT: ${PHOTON_PORT:-8890}
+      PHOTON_WEB_PORT: ${PHOTON_WEB_PORT:-10000}
+      PHOTON_MCP_PORT: ${PHOTON_MCP_PORT:-10001}
+      PHOTON_WEB_UPSTREAM: photon
+      PHOTON_MCP_UPSTREAM: photon-mcp
+    volumes:
+      - ../deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${PHOTON_BIND:-0.0.0.0}:${PHOTON_PORT:-8890}:${PHOTON_PORT:-8890}"
+    depends_on:
+      photon:
+        condition: service_healthy
+      photon-mcp:
+        condition: service_started
     restart: unless-stopped

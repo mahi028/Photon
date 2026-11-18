@@ -13,10 +13,14 @@
       <img src="{{ url_for('static', filename='assets/logo.png') }}" alt="Photon" class="h-8 w-auto" />
       <span class="text-sm font-semibold text-gray-200">Pipelines</span>
     </div>
+    <div class="flex items-center gap-3 shrink-0">
+    <a href="/batches" class="text-sm text-gray-400 hover:text-indigo-400">Batches</a>
+    <a href="/models" class="text-sm text-gray-400 hover:text-indigo-400">Models</a>
     <button @click="createBlank()" class="btn-primary text-sm px-4 py-2 flex items-center gap-2 shrink-0">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
       New Pipeline
     </button>
+    </div>
   </header>
 
   <main class="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
@@ -42,7 +46,59 @@
               </button>
             </div>
             <p class="text-xs text-gray-500 line-clamp-2" x-text="p.description || 'No description'"></p>
-            <p class="text-[11px] text-gray-600" x-text="`${(p.graph.nodes || []).length} nodes`"></p>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-[11px] text-gray-600" x-text="`${(p.graph.nodes || []).length} nodes`"></span>
+              <template x-if="p.publication">
+                <a :href="`/published/${p.publication.published_id}`" class="text-[11px] px-1.5 py-0.5 rounded"
+                   :class="p.publication.unpublished ? 'bg-gray-800 text-gray-400' : 'bg-emerald-900/60 text-emerald-300'"
+                   x-text="p.publication.unpublished ? 'unpublished' : `published v${p.publication.latest_version}`"></a>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <!-- Public: published by anyone on this instance (D-035) -->
+    <section class="mb-8">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+        <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Public <span class="text-gray-600 normal-case font-normal">— published by your colleagues; run as-is or fork to edit</span></h2>
+        <input x-model="query" type="search" placeholder="Search title, description, author…"
+               class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500 w-full sm:w-64" />
+      </div>
+      <template x-if="!loading && publicFiltered.length === 0">
+        <p class="text-sm text-gray-600" x-text="query ? 'No matches.' : 'Nothing published yet. Open one of your pipelines and press Publish.'"></p>
+      </template>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <template x-for="p in publicFiltered" :key="p.published_id">
+          <div class="panel flex flex-col gap-2 hover:border-gray-700 transition-colors" :class="p.unpublished_at && 'opacity-60'">
+            <a :href="`/published/${p.published_id}`" class="block -mx-4 -mt-4 mb-1 h-32 bg-gray-950 border-b border-gray-800 rounded-t-xl overflow-hidden">
+              <template x-if="p.thumbnail_url">
+                <img :src="p.thumbnail_url" :alt="`${p.title} example output`" loading="lazy" class="w-full h-full object-cover" />
+              </template>
+              <template x-if="!p.thumbnail_url">
+                <div class="w-full h-full flex flex-wrap items-center justify-center content-center gap-1 px-3">
+                  <template x-for="(op, i) in (p.ops || []).slice(0, 6)" :key="i">
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-mono border border-gray-800 text-gray-500" x-text="op"></span>
+                  </template>
+                </div>
+              </template>
+            </a>
+            <div class="flex items-start justify-between gap-2">
+              <a :href="`/published/${p.published_id}`" class="text-sm font-medium text-gray-100 hover:text-indigo-400 truncate" x-text="p.title"></a>
+              <span class="text-[11px] text-gray-500 shrink-0" x-text="`v${p.latest_version}`"></span>
+            </div>
+            <p class="text-xs text-gray-500 line-clamp-2" x-text="p.description || 'No description'"></p>
+            <p class="text-[11px] text-gray-600">
+              <span x-text="p.is_mine ? 'by you' : `by ${p.owner}`"></span> ·
+              <span x-text="`${p.node_count} nodes`"></span><span x-show="p.uses_custom_nodes"> · custom code</span>
+              <span x-show="p.unpublished_at"> · unpublished</span>
+            </p>
+            <div class="flex items-center justify-end gap-3 pt-1">
+              <button x-show="p.is_mine && !p.unpublished_at" @click="unpublish(p)" class="text-xs text-gray-500 hover:text-red-400 mr-auto">Unpublish</button>
+              <a :href="`/published/${p.published_id}`" class="text-xs text-gray-400 hover:text-gray-200">Open / run</a>
+              <button @click="fork(p)" :disabled="cloning" class="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50">Fork</button>
+            </div>
           </div>
         </template>
       </div>
@@ -76,8 +132,17 @@
 function pipelineLibrary() {
   return {
     all: [],
+    published: [],
+    query: '',
     loading: true,
     cloning: false,
+
+    get publicFiltered() {
+      const q = this.query.trim().toLowerCase();
+      if (!q) return this.published;
+      return this.published.filter(p => [p.title, p.description, p.owner]
+        .some(f => (f || '').toLowerCase().includes(q)));
+    },
 
     get mine() { return this.all.filter(p => !p.is_preset); },
     get presets() { return this.all.filter(p => p.is_preset); },
@@ -85,15 +150,16 @@ function pipelineLibrary() {
     async load() {
       this.loading = true;
       try {
-        const res = await fetch('/api/pipelines');
+        const [res, pubRes] = await Promise.all([fetch('/api/pipelines'), fetch('/api/published')]);
         if (res.ok) this.all = await res.json();
+        if (pubRes.ok) this.published = await pubRes.json();
       } finally {
         this.loading = false;
       }
     },
 
     async createBlank() {
-      const title = prompt('Pipeline name:', 'My pipeline');
+      const title = await window.ui.prompt({title: 'New pipeline', label: 'Name', value: 'My pipeline', confirmText: 'Create', required: true, maxLength: 120});
       if (!title) return;
       const res = await fetch('/api/pipelines', {
         method: 'POST',
@@ -102,7 +168,7 @@ function pipelineLibrary() {
       });
       const data = await res.json();
       if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-      else alert(data.error || 'Create failed');
+      else window.ui.toast(data.error || 'Create failed', 'error');
     },
 
     async clone(p) {
@@ -115,17 +181,42 @@ function pipelineLibrary() {
         });
         const data = await res.json();
         if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-        else alert(data.error || 'Clone failed');
+        else window.ui.toast(data.error || 'Clone failed', 'error');
+      } finally {
+        this.cloning = false;
+      }
+    },
+
+    async unpublish(p) {
+      if (!(await window.ui.confirm({title: 'Unpublish pipeline?', message: `Colleagues can no longer see or run "${p.title}". Its versions are kept, and publishing again restores it.`, confirmText: 'Unpublish', danger: true}))) return;
+      const res = await fetch(`/api/published/${p.published_id}/unpublish`, {method: 'POST'});
+      if (res.ok) { await this.load(); window.ui.toast(`Unpublished "${p.title}".`, 'success'); }
+      else window.ui.toast('Unpublish failed', 'error');
+    },
+
+    async fork(p) {
+      this.cloning = true;
+      try {
+        const res = await fetch(`/api/published/${p.published_id}/fork`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: '{}',
+        });
+        const data = await res.json();
+        if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
+        else window.ui.toast(data.error || 'Fork failed', 'error');
       } finally {
         this.cloning = false;
       }
     },
 
     async remove(p) {
-      if (!confirm(`Delete pipeline "${p.title}"?`)) return;
+      const note = p.publication && !p.publication.unpublished
+        ? ' Its published versions stay available to colleagues; unpublish it from the Public section if you want it gone too.' : '';
+      if (!(await window.ui.confirm({title: 'Delete pipeline?', message: `"${p.title}" will be permanently deleted from your library.${note}`, confirmText: 'Delete', danger: true}))) return;
       const res = await fetch(`/api/pipelines/${p.pipeline_id}`, {method: 'DELETE'});
       if (res.ok) this.all = this.all.filter(x => x.pipeline_id !== p.pipeline_id);
-      else alert('Delete failed');
+      else window.ui.toast('Delete failed', 'error');
     },
 
     init() { this.load(); },

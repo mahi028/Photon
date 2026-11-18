@@ -68,15 +68,27 @@ def _handle(request: dict) -> dict:
         if not spec.requires_model:
             return {"ok": False, "error": f"Op '{op_name}' is not a model op"}
 
+        params = dict(request.get("params") or {})
+        model_name = spec.requires_model
+        if model_name == "__user__":
+            # Uploaded model (D-047): only with a grant the parent issued for
+            # this model and run. The sandboxed child can only pass a token on.
+            from .user_models import check_grant
+            mid = params.get("model_id")
+            if not check_grant(params.pop("_grant", None), mid):
+                return {"ok": False, "error": f"No permission to run model '{mid}' in this run."}
+            model_name = f"user:{mid}"
+        params.pop("_grant", None)
+
         kwargs = {port: np.load(path, allow_pickle=False)
                   for port, path in (request.get("inputs") or {}).items()}
-        kwargs.update(request.get("params") or {})
+        kwargs.update(params)
 
         manager = get_manager()
         try:
             # acquire() holds a reference for the whole call, so the idle
             # reaper can never unload the model mid-inference.
-            with manager.acquire(spec.requires_model) as model:
+            with manager.acquire(model_name) as model:
                 outputs = spec.fn(model=model, **kwargs)
         except ModelLoadError as e:
             return {"ok": False, "error": str(e)}

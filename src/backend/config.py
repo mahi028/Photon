@@ -14,9 +14,11 @@ from dotenv import load_dotenv
 
 from .core.sandbox.dep_sync import sync_from_pyproject
 
-# Load .env from project root
+# Load .env from project root — except in sandbox children (PHOTON_NO_DOTENV=1,
+# set by the executors), which must never hold the app's secrets.
 _root = Path(__file__).parent.parent.parent
-load_dotenv(_root / ".env")
+if os.getenv("PHOTON_NO_DOTENV") != "1":
+    load_dotenv(_root / ".env")
 
 # Auto-synced from pyproject.toml [project].dependencies at import time —
 # `uv add xyz` + restart makes a new library sandbox-importable, no manual edit.
@@ -112,9 +114,25 @@ class Config:
     GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
     GOOGLE_OAUTH_ENABLED: bool = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
+    # ---- Ports (D-051) ----
+    # One public port (Caddy, deploy/Caddyfile) in front of two local backends:
+    # /mcp goes to the MCP server, everything else to the web app.
+    PORT: int = int(os.getenv("PHOTON_PORT", "8890"))
+    WEB_HOST: str = os.getenv("PHOTON_WEB_HOST", "127.0.0.1")
+    WEB_PORT: int = int(os.getenv("PHOTON_WEB_PORT", "10000"))
+    MCP_HOST: str = os.getenv("PHOTON_MCP_HOST", "127.0.0.1")
+    MCP_PORT: int = int(os.getenv("PHOTON_MCP_PORT", "10001"))
+
+    # ---- MCP server ----
+    # Externally reachable MCP endpoint (e.g. behind a port-forward/proxy), shown
+    # on the API keys page. Empty = the page's own origin + /mcp (same port behind Caddy).
+    MCP_PUBLIC_URL: str = os.getenv("PHOTON_MCP_PUBLIC_URL", "")
+
     # ---- Volume paths (relative to project root) ----
     ROOT_DIR: Path = _root
-    VOLUMES_DIR: Path = _root / "volumes"
+    # PHOTON_VOLUMES_DIR relocates all runtime state (DB, uploads, outputs);
+    # the test suite points it at a temp dir.
+    VOLUMES_DIR: Path = Path(os.getenv("PHOTON_VOLUMES_DIR") or (_root / "volumes")).resolve()
     UPLOADS_DIR: Path = VOLUMES_DIR / "uploads"
     OUTPUTS_DIR: Path = VOLUMES_DIR / "outputs"
     TMP_EXEC_DIR: Path = VOLUMES_DIR / "tmp_exec"
@@ -132,10 +150,8 @@ class Config:
     SANDBOX_ALLOWED_IMPORTS: frozenset = _SYNCED_SANDBOX_IMPORTS
     SANDBOX_LIBRARY_WHITELIST: str = _SYNCED_LIBRARY_WHITELIST
 
-    # Sandbox executor class
-    # Use DockerExecutor in production for security, SubprocessExecutor in development for speed
-    # EXECUTOR_CLASS: str = "docker" if ENV == "production" else "subprocess"
-    EXECUTOR_CLASS: str = "subprocess"
+    # Where untrusted code runs: PHOTON_SANDBOX=local|remote, read at call
+    # time by core/sandbox/backend.py (D-038).
 
 
 config = Config()

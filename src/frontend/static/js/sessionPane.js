@@ -160,15 +160,15 @@ function sessionPane(sess) {
         const data = await res.json();
 
         if (!res.ok) {
-          alert('Error running snippet: ' + (data.error || 'Unknown'));
+          window.ui.toast('Error running snippet: ' + (data.error || 'Unknown'), 'error');
         } else if (data.batch_run) {
           const outRes = await fetch(`/api/sessions/${this.sess.session_id}/outputs`);
           if (outRes.ok) this._buildOutputsBySlot(await outRes.json());
         } else {
-          alert('Snippet finished. Stderr:\n' + (data.stderr || 'None'));
+          await window.ui.alert({title: 'Snippet finished', message: data.stderr || 'No stderr output.', mono: !!data.stderr});
         }
       } catch (e) {
-        alert('Execution failed: ' + e.message);
+        window.ui.toast('Execution failed: ' + e.message, 'error');
       } finally {
         this.running = false;
         this.statusMsg = '';
@@ -205,6 +205,19 @@ function sessionPane(sess) {
         }
 
         // --- pipeline events (v3 P2) ---
+        if (event.event === 'pipeline_resolved') {
+          // LLM picked a shared pipeline: swap the {published_id} stub for its nodes
+          const msg = this._lastPipelineMessage();
+          if (msg) msg.pipeline = event.pipeline;
+        }
+        if (event.event === 'node_values' && event.image_slot === 0) {
+          // numbers / thresholds / tables a pipeline produced (D-041)
+          const msg = this._lastPipelineMessage();
+          if (msg) msg.nodeValues = {...(msg.nodeValues || {}), ...event.values};
+        }
+        if (event.event === 'model_saved') {
+          window.ui && window.ui.toast(`Saved model "${event.model.name}" (${event.model.estimator}).`, 'success');
+        }
         if (event.event === 'pipeline_invalid') {
           const msg = this._lastPipelineMessage();
           if (msg) msg.pipelineIssues = event.issues || [];
@@ -314,9 +327,10 @@ function sessionPane(sess) {
 
     async savePipelineToLibrary(msg) {
       if (!msg.pipeline || msg.savingPipeline) return;
+      if (msg.pipeline.published) return this._forkShared(msg);
       msg.savingPipeline = true;
       try {
-        const title = prompt('Save pipeline as:', 'LLM pipeline');
+        const title = await window.ui.prompt({title: 'Save pipeline', label: 'Name', value: 'LLM pipeline', confirmText: 'Save', required: true, maxLength: 120});
         if (!title) return;
         const res = await fetch('/api/pipelines', {
           method: 'POST',
@@ -328,13 +342,43 @@ function sessionPane(sess) {
         msg.savedPipelineId = data.pipeline_id;
         return data.pipeline_id;
       } catch (e) {
-        alert('Could not save pipeline: ' + e.message);
+        window.ui.toast('Could not save pipeline: ' + e.message, 'error');
+      } finally {
+        msg.savingPipeline = false;
+      }
+    },
+
+    async _forkShared(msg) {
+      // A shared pipeline's custom nodes live in its published snapshot, not in
+      // this user's library, so a plain save would reference nodes they don't
+      // have. Fork instead: it imports those nodes into the library.
+      const pub = msg.pipeline.published;
+      msg.savingPipeline = true;
+      try {
+        const res = await fetch(`/api/published/${pub.published_id}/fork`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({version: pub.version}),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Fork failed');
+        msg.savedPipelineId = data.pipeline_id;
+        window.ui.toast('Forked into your pipelines.', 'success');
+        return data.pipeline_id;
+      } catch (e) {
+        window.ui.toast('Could not fork pipeline: ' + e.message, 'error');
       } finally {
         msg.savingPipeline = false;
       }
     },
 
     async openPipelineInEditor(msg) {
+      const pub = msg.pipeline?.published;
+      if (pub && !msg.savedPipelineId) {
+        // read-only view of the exact version that ran; it has its own Fork button
+        window.location.href = `/published/${pub.published_id}?version=${pub.version}`;
+        return;
+      }
       // Editor works on saved pipelines, so save first if needed, then jump.
       const id = msg.savedPipelineId || await this.savePipelineToLibrary(msg);
       if (id) window.location.href = `/pipelines/${id}`;
@@ -473,7 +517,7 @@ function sessionPane(sess) {
         this.sess.image_ids.push(upData.image_id);
         this.outputsBySlot[this.sess.images.length - 1] = [];
       } catch (e) {
-        alert('Add image failed: ' + e.message);
+        window.ui.toast('Add image failed: ' + e.message, 'error');
       } finally {
         this.addingImage = false;
       }

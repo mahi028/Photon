@@ -105,3 +105,104 @@ def segment_foreground(image, model, target_class="any", threshold=0.5):
         fg = probs[_VOC_CLASSES.index(target_class)]
 
     return {"mask": (fg >= float(threshold)).cpu().numpy().astype(bool)}
+
+
+# ---------------------------------------------------------------------------
+# Uploaded segmentation models (D-047)
+# ---------------------------------------------------------------------------
+
+def _seg_preprocess(image: np.ndarray, spec: dict):
+    """Image -> (1, C, H, W) float tensor at the spec's input size."""
+    import cv2
+    import torch
+    a = np.asarray(image)
+    if a.dtype == np.uint16:
+        a = (a / 257).astype(np.uint8)
+    elif a.dtype != np.uint8:
+        f = a.astype(np.float32)
+        a = (np.clip(f, 0, 1) * 255 if f.max() <= 1.0 else np.clip(f, 0, 255)).astype(np.uint8)
+    if spec["color"] == "gray":
+        a = a if a.ndim == 2 else cv2.cvtColor(a[..., :3], cv2.COLOR_RGB2GRAY)
+        a = a[..., None]
+    else:
+        a = np.stack([a] * 3, -1) if a.ndim == 2 else a[..., :3]
+        if spec["color"] == "bgr":
+            a = a[..., ::-1]
+    H, W = spec["input_size"]
+    x = cv2.resize(np.ascontiguousarray(a), (W, H), interpolation=cv2.INTER_AREA)
+    x = x.reshape(H, W, -1).astype(np.float32) / 255.0
+    if spec["normalize"] == "imagenet":
+        x = (x - np.array([0.485, 0.456, 0.406], np.float32)) / np.array([0.229, 0.224, 0.225], np.float32)
+    elif spec["normalize"] == "custom":
+        x = (x - np.array(spec["mean"], np.float32)) / np.array(spec["std"], np.float32)
+    return torch.from_numpy(x.transpose(2, 0, 1).copy()).unsqueeze(0)
+
+
+def _seg_postprocess(mask: np.ndarray, pp: dict) -> np.ndarray:
+    import cv2
+    m = mask.astype(np.uint8) * 255
+    r = int(pp.get("closing_radius") or 0)
+    if r:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+    frac = float(pp.get("min_component_frac") or 0)
+    if frac > 0 or pp.get("fill_holes"):
+        n, lab, st, _ = cv2.connectedComponentsWithStats((m > 0).astype(np.uint8), 8)
+        keep = np.zeros(n, bool)
+        keep[1:] = st[1:, cv2.CC_STAT_AREA] >= frac * m.size
+        m = np.where(keep[lab], 255, 0).astype(np.uint8)
+        if pp.get("fill_holes"):
+            from scipy import ndimage as ndi
+            m = (ndi.binary_fill_holes(m > 0) * 255).astype(np.uint8)
+    if pp.get("smooth"):
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        m = cv2.GaussianBlur(m, (0, 0), 2)
+        m = np.where(m < 127, 0, 255).astype(np.uint8)
+    return m > 0
+
+
+@register_model_op(
+    name="segment_with_model", category="masking", model="__user__",
+    inputs=[Port("image", PortType.IMAGE_ANY)],
+    outputs=[Port("mask", PortType.MASK), Port("probability", PortType.FLOAT_MAP),
+             Port("labels", PortType.ARRAY)],
+    params=[
+        Param("model_id", "str", None, required=True,
+              doc="An uploaded segmentation model (Models page, or list_models(kind='segmentation') over MCP)."),
+        Param("threshold", "float", None, nullable=True, min=0.0, max=1.0,
+              doc="Probability cut-off for the mask. Empty: the model's own setting."),
+        Param("postprocess", "bool", True,
+              doc="Apply the model's post-processing (closing, small components, hole filling)."),
+    ],
+    doc="Run an uploaded segmentation model (e.g. a tissue/background SegFormer). The image is "
+        "resized to the model's input size and normalised as declared; outputs come back at the "
+        "image's size: mask (foreground), probability (of foreground), labels (class per pixel).",
+)
+def segment_with_model(image, model, model_id=None, threshold=None, postprocess=True):
+    import cv2
+    import torch
+
+    spec = model.spec
+    arr = np.asarray(image)
+    h, w = arr.shape[:2]
+    x = _seg_preprocess(arr, spec).to(model.device)
+    with torch.no_grad():
+        logits = model.net(x)[0].float()                 # (C, H, W)
+    if spec["activation"] == "sigmoid":
+        prob = torch.sigmoid(logits).cpu().numpy()
+        fg = prob[0]
+        labels_small = None
+    else:
+        prob = torch.softmax(logits, 0).cpu().numpy()
+        fg = prob[spec["foreground_class"]]
+        labels_small = prob.argmax(0).astype(np.uint8)
+    fg = cv2.resize(fg.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    t = spec["threshold"] if threshold is None else float(threshold)
+    mask = fg > t
+    if postprocess:
+        mask = _seg_postprocess(mask, spec["postprocess"])
+    if labels_small is None:
+        labels = mask.astype(np.int32)
+    else:
+        labels = cv2.resize(labels_small, (w, h), interpolation=cv2.INTER_NEAREST).astype(np.int32)
+    return {"mask": mask, "probability": np.clip(fg, 0, 1), "labels": labels}

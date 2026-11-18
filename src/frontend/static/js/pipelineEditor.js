@@ -16,9 +16,16 @@
 
 const INPUT_OP = '__input__';
 
-function pipelineEditor(pipelineId) {
+function pipelineEditor(pipelineId, publishedId = null, publishedVersion = null) {
   return {
     pipelineId,
+    // Published mode (D-035): viewing an instance-wide published version.
+    // Read-only like a preset; custom nodes come from the version's snapshot.
+    publishedId,
+    publishedVersion,
+    published: null,        // GET /api/published/<id> payload in published mode
+    publication: null,      // own pipeline's publish status (library mode)
+    publishing: false,
     editor: null,
     catalog: {ops: [], coercions: [], custom_nodes: []},
     opsByName: {},
@@ -32,13 +39,26 @@ function pipelineEditor(pipelineId) {
     issues: [],
     runError: null,
     nodePreviews: {},
+    nodeValues: {},          // node id -> {port: value} for non-image outputs (D-041)
     paletteFilter: '',
+    libraryResults: [],      // library ops matching paletteFilter (server search)
+    libraryTotal: 0,
+    _libSearchTimer: null,
+    _libSearchSeq: 0,
+    jsonDrafts: {},          // "nodeId:param" -> text while a JSON param doesn't parse
     sessions: [],
     selectedSessionId: '',
     selectedNodeId: null,
     loadFailed: false,
 
     // --- lifecycle -------------------------------------------------------
+
+    subSpecs: {},         // "<published_id>@<version>" -> node interface (D-045)
+    publishedList: [],
+    savedModels: [],
+    segModels: [],
+    savedLabels: [],
+    _assetsLoading: false,
 
     async init() {
       if (typeof Drawflow === 'undefined') {
@@ -47,9 +67,12 @@ function pipelineEditor(pipelineId) {
         return;
       }
 
+      const pipeUrl = this.publishedId
+        ? `/api/published/${this.publishedId}` + (this.publishedVersion ? `?version=${this.publishedVersion}` : '')
+        : `/api/pipelines/${this.pipelineId}`;
       const [catRes, pipeRes, sessRes] = await Promise.all([
         fetch('/api/ops'),
-        fetch(`/api/pipelines/${this.pipelineId}`),
+        fetch(pipeUrl),
         fetch('/api/sessions'),
       ]);
 
@@ -63,15 +86,38 @@ function pipelineEditor(pipelineId) {
         (this.catalog.custom_nodes || []).map(c => [c.custom_node_id, c]));
 
       this.pipeline = await pipeRes.json();
-      this.title = this.pipeline.title;
-      this.isPreset = this.pipeline.is_preset;
+      if (this.publishedId) {
+        this.published = this.pipeline;
+        this.publishedVersion = this.pipeline.version;
+        this.title = this.pipeline.version_title;
+        this.isPreset = true;   // read-only
+        for (const [cid, cn] of Object.entries(this.pipeline.custom_nodes || {})) {
+          this.customById[cid] = {custom_node_id: cid, ...cn};
+        }
+      } else {
+        this.title = this.pipeline.title;
+        this.isPreset = this.pipeline.is_preset;
+        this.publication = this.pipeline.publication || null;
+      }
       if (sessRes.ok) {
         this.sessions = await sessRes.json();
         if (this.sessions.length) this.selectedSessionId = this.sessions[0].session_id;
       }
+      await this._loadLibrarySpecs((this.pipeline.graph?.nodes || []).map(n => n.op));
+      await Promise.all((this.pipeline.graph?.nodes || []).filter(n => n.pipeline)
+        .map(n => this._loadSubSpec(n.pipeline)));
+      fetch('/api/published').then(r => r.ok ? r.json() : [])
+        .then(list => { this.publishedList = list || []; });
+      this.$watch('paletteFilter', () => this._searchLibrary());
 
       this._initDrawflow();
       this._importGraph(this.pipeline.graph);
+      // Graphs from the chat / MCP / older saves have no positions: lay them
+      // out. Either way, start with the whole pipeline in view.
+      const nodes = this.pipeline.graph?.nodes || [];
+      await this.$nextTick();
+      if (nodes.length && nodes.some(n => !n.pos)) this.prettify({markDirty: false});
+      else this.fitView();
     },
 
     _initDrawflow() {
@@ -79,6 +125,17 @@ function pipelineEditor(pipelineId) {
       this.editor = new Drawflow(container);
       this.editor.reroute = true;
       this.editor.start();
+
+      this.editor.zoom_min = 0.15;
+      this.editor.zoom_max = 2.5;
+      // Wheel zooms around the cursor. Drawflow's own handler (Ctrl+wheel,
+      // around the canvas centre) is skipped: this listener is on the wrapper,
+      // in the capture phase, and stops the event before it reaches it.
+      container.parentElement.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this._zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015)));
+      }, {passive: false, capture: true});
 
       this.editor.on('connectionCreated', (info) => this._onConnection(info));
       this.editor.on('nodeSelected', (id) => { this.selectedNodeId = id; });
@@ -90,7 +147,7 @@ function pipelineEditor(pipelineId) {
     // --- type checking ---------------------------------------------------
 
     _canConnect(srcType, dstType) {
-      if (dstType === 'ANY' || srcType === dstType) return true;
+      if (dstType === 'ANY' || srcType === 'ANY' || srcType === dstType) return true;
       return (this.catalog.coercions || []).some(
         c => c.src === srcType && c.dst === dstType);
     },
@@ -103,6 +160,10 @@ function pipelineEditor(pipelineId) {
       if (data.custom_node_id) {
         const cn = this.customById[data.custom_node_id];
         return cn ? cn.ports : {inputs: [], outputs: []};
+      }
+      if (data.pipeline) {
+        const sp = this.subSpecs[this._subKey(data.pipeline)];
+        return sp ? {inputs: sp.inputs, outputs: sp.outputs} : {inputs: [], outputs: []};
       }
       const spec = this.opsByName[data.op];
       return spec ? {inputs: spec.inputs, outputs: spec.outputs} : {inputs: [], outputs: []};
@@ -123,7 +184,7 @@ function pipelineEditor(pipelineId) {
       // run time, so allow it into any image-ish port (server does the same).
       const srcIsInput = (src.data || {}).op === INPUT_OP;
       const ok = srcIsInput
-        ? ['IMAGE_ANY', 'IMAGE_RGB', 'IMAGE_GRAY', 'FLOAT_MAP', 'ANY'].includes(dstPort.type)
+        ? ['IMAGE_ANY', 'IMAGE_RGB', 'IMAGE_GRAY', 'FLOAT_MAP', 'ANY', 'ARRAY'].includes(dstPort.type)
         : this._canConnect(srcPort.type, dstPort.type);
 
       if (!ok) {
@@ -137,11 +198,66 @@ function pipelineEditor(pipelineId) {
       }
     },
 
-    _toast(message) {
-      this.issues = [{node_id: null, message}];
-      setTimeout(() => {
-        if (this.issues.length === 1 && this.issues[0].message === message) this.issues = [];
-      }, 6000);
+    _toast(message, kind = 'info') {
+      window.ui.toast(message, kind);
+    },
+
+    // --- library ops (D-041) ---------------------------------------------
+
+    async _loadLibrarySpecs(opNames) {
+      // Library specs aren't in /api/ops (hundreds of them): fetch the ones a
+      // graph uses before importing it.
+      const want = [...new Set(opNames.filter(n => n && n.startsWith('lib:') && !this.opsByName[n]))];
+      if (!want.length) return;
+      const res = await fetch(`/api/ops/library?names=${encodeURIComponent(want.join(','))}`);
+      if (!res.ok) return;
+      for (const op of (await res.json()).ops || []) this.opsByName[op.name] = op;
+    },
+
+    _searchLibrary() {
+      clearTimeout(this._libSearchTimer);
+      const q = this.paletteFilter.trim();
+      if (q.length < 2) { this.libraryResults = []; return; }
+      const seq = ++this._libSearchSeq;
+      this._libSearchTimer = setTimeout(async () => {
+        const res = await fetch(`/api/ops/library?q=${encodeURIComponent(q)}&limit=40`);
+        if (!res.ok || seq !== this._libSearchSeq) return;
+        const data = await res.json();
+        this.libraryResults = data.ops || [];
+        this.libraryTotal = data.total || 0;
+      }, 250);
+    },
+
+    shortName(name) {
+      return name.startsWith('lib:') ? name.slice(name.lastIndexOf('.') + 1) : name;
+    },
+
+    // --- published pipelines as nodes (D-045) ------------------------------
+
+    _subKey(ref) { return `${ref.published_id}@${ref.version}`; },
+
+    async _loadSubSpec(ref) {
+      const key = this._subKey(ref);
+      if (this.subSpecs[key]) return this.subSpecs[key];
+      const q = ref.version ? `?version=${ref.version}` : '';
+      const res = await fetch(`/api/published/${ref.published_id}/node${q}`);
+      if (!res.ok) return null;
+      const itf = await res.json();
+      const spec = {...itf, name: `pipeline: ${itf.title} v${itf.version}`, subpipeline: true,
+                    library: {}, doc: itf.doc || `Published by ${itf.owner}`};
+      this.subSpecs[this._subKey(itf)] = spec;
+      if (!ref.version) this.subSpecs[key] = spec;
+      return spec;
+    },
+
+    async addPipelineNode(pub) {
+      const spec = await this._loadSubSpec({published_id: pub.published_id});
+      if (!spec) { this._toast('Could not load that pipeline.', 'error'); return; }
+      const nodeId = `${(pub.title || 'pipeline').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20)}_${Math.random().toString(36).slice(2, 6)}`;
+      this._addNode({our_id: nodeId, pipeline: {published_id: spec.published_id, version: spec.version},
+                     label: spec.name, params: {}},
+                    spec.inputs.length, spec.outputs.length, 240 + Math.random() * 120, 80 + Math.random() * 220);
+      this.dirty = true;
     },
 
     // --- palette ---------------------------------------------------------
@@ -161,14 +277,26 @@ function pipelineEditor(pipelineId) {
         inputs: c.ports.inputs, outputs: c.ports.outputs, params: c.params || [],
         custom_node_id: c.custom_node_id,
       }));
+      const pubs = this.publishedList.filter(p => !p.unpublished_at && (!q
+        || [p.title, p.description, p.owner].some(f => (f || '').toLowerCase().includes(q))));
+      if (pubs.length) groups['published pipelines'] = pubs.slice(0, 30).map(p => ({
+        name: p.title, category: 'published', doc: `${p.owner} · v${p.latest_version}${p.description ? ' · ' + p.description : ''}`,
+        inputs: [], outputs: [], params: [], published_id: p.published_id,
+      }));
+      for (const op of this.libraryResults) {
+        (groups[`library · ${op.category}`] = groups[`library · ${op.category}`] || []).push(op);
+      }
       return groups;
     },
 
     addOpNode(op) {
       if (this.isPreset) return;
-      const nodeId = `${op.name}_${Math.random().toString(36).slice(2, 7)}`;
+      if (op.published_id) { this.addPipelineNode(op); return; }
+      if (op.library) this.opsByName[op.name] = op;
+      const nodeId = `${this.shortName(op.name)}_${Math.random().toString(36).slice(2, 7)}`;
       const params = {};
-      (op.params || []).forEach(p => { params[p.name] = p.default; });
+      // Library ops start with no params set, so the function's own defaults apply.
+      if (!op.library) (op.params || []).forEach(p => { params[p.name] = p.default; });
       this._addNode({
         our_id: nodeId,
         op: op.custom_node_id ? undefined : op.name,
@@ -189,18 +317,22 @@ function pipelineEditor(pipelineId) {
     _addNode(data, nIn, nOut, x, y) {
       const ports = data.op === INPUT_OP
         ? {inputs: [], outputs: [{name: 'image', type: 'IMAGE_ANY'}]}
-        : (data.custom_node_id
-            ? this.customById[data.custom_node_id].ports
-            : {inputs: this.opsByName[data.op].inputs, outputs: this.opsByName[data.op].outputs});
+        : (data.pipeline
+            ? this._portsOf({data})
+            : (data.custom_node_id
+                ? this.customById[data.custom_node_id].ports
+                : {inputs: this.opsByName[data.op].inputs, outputs: this.opsByName[data.op].outputs}));
 
+      const esc = (t) => String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
       const inLabels = ports.inputs.map(p =>
-        `<div class="df-port-label">${p.name}<span class="df-port-type">${p.type}</span></div>`).join('');
+        `<div class="df-port-label${p.optional ? ' df-port-optional' : ''}" title="${p.optional ? 'optional' : ''}">${esc(p.name)}${p.optional ? '?' : ''}<span class="df-port-type">${p.type}</span></div>`).join('');
       const outLabels = ports.outputs.map(p =>
         `<div class="df-port-label df-out">${p.name}<span class="df-port-type">${p.type}</span></div>`).join('');
       const isInput = data.op === INPUT_OP;
       const html = `
-        <div class="df-node ${isInput ? 'df-node-input' : ''}">
-          <div class="df-node-title">${data.label}</div>
+        <div class="df-node ${isInput ? 'df-node-input' : ''} ${data.pipeline ? 'df-node-sub-pipeline' : ''}">
+          <div class="df-node-title" title="${esc(data.label)}">${esc(data.label.startsWith('lib:') ? this.shortName(data.label) : data.label)}</div>
+          ${data.label.startsWith('lib:') ? `<div class="df-node-sub">${esc(data.label.slice(4, data.label.lastIndexOf('.')))}</div>` : ''}
           <div class="df-node-ports">
             <div class="df-node-col">${inLabels}</div>
             <div class="df-node-col df-node-col-out">${outLabels}</div>
@@ -237,6 +369,7 @@ function pipelineEditor(pipelineId) {
         const cn = this.customById[d.custom_node_id];
         return cn ? {name: cn.name, params: cn.params || [], doc: cn.doc} : null;
       }
+      if (d.pipeline) return this.subSpecs[this._subKey(d.pipeline)] || null;
       return this.opsByName[d.op] || null;
     },
 
@@ -245,16 +378,82 @@ function pipelineEditor(pipelineId) {
       return n ? (n.data.params || {})[name] : undefined;
     },
 
+    isParamSet(name) {
+      const n = this.selectedNode;
+      return !!n && Object.prototype.hasOwnProperty.call(n.data.params || {}, name);
+    },
+
+    paramText(p) {
+      // text-box view of a str/json param; drafts keep unparsable input visible
+      const key = `${this.selectedNodeId}:${p.name}`;
+      if (key in this.jsonDrafts) return this.jsonDrafts[key];
+      if (!this.isParamSet(p.name)) return '';
+      const v = this.paramValue(p.name);
+      return p.kind === 'str' ? v : JSON.stringify(v);
+    },
+
+    paramPlaceholder(p) {
+      if (p.required) return 'required';
+      return p.default === null || p.default === undefined ? 'library default' : `default: ${JSON.stringify(p.default)}`;
+    },
+
+    jsonInvalid(p) {
+      return `${this.selectedNodeId}:${p.name}` in this.jsonDrafts;
+    },
+
+    // Saved models / painted labels pickers (D-044)
+    assetParam(p) {
+      const op = this.selectedSpec && this.selectedSpec.name;
+      if (op === 'ml_load_model' && p.name === 'model_id') { this._loadAssets(); return 'model'; }
+      if (op === 'load_labels' && p.name === 'annotation_id') { this._loadAssets(); return 'labels'; }
+      if (op === 'segment_with_model' && p.name === 'model_id') { this._loadAssets(); return 'segmodel'; }
+      return null;
+    },
+
+    _loadAssets() {
+      if (this._assetsLoading) return;
+      this._assetsLoading = true;
+      fetch('/api/models?kind=sklearn').then(r => r.ok ? r.json() : {models: []})
+        .then(d => { this.savedModels = d.models || []; });
+      fetch('/api/annotations').then(r => r.ok ? r.json() : {annotations: []})
+        .then(d => { this.savedLabels = d.annotations || []; });
+      fetch('/api/models?kind=segmentation&status=ready').then(r => r.ok ? r.json() : {models: []})
+        .then(d => { this.segModels = d.models || []; });
+    },
+
     setParam(name, value, kind) {
       const n = this.selectedNode;
       if (!n || this.isPreset) return;
-      let v = value;
-      if (kind === 'int') v = parseInt(value, 10);
-      else if (kind === 'float') v = parseFloat(value);
-      else if (kind === 'bool') v = !!value;
-      const data = {...n.data, params: {...(n.data.params || {}), [name]: v}};
-      this.editor.updateNodeDataFromId(n.id, data);
+      const params = {...(n.data.params || {})};
+      const key = `${this.selectedNodeId}:${name}`;
+      const unset = value === '' || value === null || (typeof value === 'number' && Number.isNaN(value));
+      delete this.jsonDrafts[key];
+      if (unset && (kind === 'json' || kind === 'str' || this.opsByName[n.data.op]?.library)) {
+        delete params[name];             // back to the function's default
+      } else {
+        let v = value;
+        if (kind === 'int') v = parseInt(value, 10);
+        else if (kind === 'float') v = parseFloat(value);
+        else if (kind === 'bool') v = !!value;
+        else if (kind === 'json') {
+          try { v = JSON.parse(value); }
+          catch { this.jsonDrafts = {...this.jsonDrafts, [key]: value}; return; }
+        }
+        params[name] = v;
+      }
+      this.jsonDrafts = {...this.jsonDrafts};
+      this.editor.updateNodeDataFromId(n.id, {...n.data, params});
       this.dirty = true;
+    },
+
+    get selectedValues() {
+      const n = this.selectedNode;
+      return n ? this.nodeValues[(n.data || {}).our_id] || null : null;
+    },
+
+    formatValue(v) {
+      const t = JSON.stringify(v);
+      return t && t.length > 400 ? t.slice(0, 400) + '…' : t;
     },
 
     // --- graph <-> drawflow ---------------------------------------------
@@ -274,6 +473,7 @@ function pipelineEditor(pipelineId) {
         if (d.op === INPUT_OP) continue;   // implicit on the server side
         const node = {id: idOf[dfId], params: d.params || {}};
         if (d.custom_node_id) node.custom_node_id = d.custom_node_id;
+        else if (d.pipeline) node.pipeline = d.pipeline;
         else node.op = d.op;
         node.pos = {x: n.pos_x, y: n.pos_y};   // round-trips layout; server ignores it
         nodes.push(node);
@@ -312,19 +512,23 @@ function pipelineEditor(pipelineId) {
 
       (graph.nodes || []).forEach((node, i) => {
         const isCustom = !!node.custom_node_id;
-        const spec = isCustom ? this.customById[node.custom_node_id] : this.opsByName[node.op];
+        const isSub = !!node.pipeline;
+        const spec = isSub ? this.subSpecs[this._subKey(node.pipeline)]
+          : (isCustom ? this.customById[node.custom_node_id] : this.opsByName[node.op]);
         if (!spec) {
           this.issues.push({node_id: node.id,
-            message: `Unknown ${isCustom ? 'custom node' : 'op'} "${node.op || node.custom_node_id}" — skipped.`});
+            message: isSub ? `Published pipeline ${node.pipeline.published_id} v${node.pipeline.version} is not available (unpublished?) — skipped.`
+              : `Unknown ${isCustom ? 'custom node' : 'op'} "${node.op || node.custom_node_id}" — skipped.`});
           return;
         }
         const ports = isCustom ? spec.ports : {inputs: spec.inputs, outputs: spec.outputs};
         const pos = node.pos || {x: 260 + (i % 4) * 210, y: 60 + Math.floor(i / 4) * 170};
         this._addNode({
           our_id: node.id,
-          op: isCustom ? undefined : node.op,
+          op: isCustom || isSub ? undefined : node.op,
           custom_node_id: node.custom_node_id,
-          label: isCustom ? `custom:${spec.name}` : node.op,
+          pipeline: node.pipeline,
+          label: isSub ? spec.name : (isCustom ? `custom:${spec.name}` : node.op),
           params: node.params || {},
         }, ports.inputs.length, ports.outputs.length, pos.x, pos.y);
         dfIdByOurId[node.id] = this.editor.nodeId - 1;
@@ -351,6 +555,10 @@ function pipelineEditor(pipelineId) {
     // --- actions ---------------------------------------------------------
 
     async validate() {
+      // A published version was validated at publish time against its own
+      // snapshot; the server re-validates on run. /api/pipelines/validate only
+      // knows the viewer's library, so it would reject the author's custom nodes.
+      if (this.publishedId) { this.issues = []; return true; }
       const graph = this._exportGraph();
       const res = await fetch('/api/pipelines/validate', {
         method: 'POST',
@@ -376,7 +584,7 @@ function pipelineEditor(pipelineId) {
         this.dirty = false;
         await this.validate();   // surface issues without blocking the save
       } catch (e) {
-        alert(e.message);
+        this._toast(e.message, 'error');
       } finally {
         this.saving = false;
       }
@@ -390,7 +598,74 @@ function pipelineEditor(pipelineId) {
       });
       const data = await res.json();
       if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
-      else alert(data.error || 'Clone failed');
+      else this._toast(data.error || 'Clone failed', 'error');
+    },
+
+    async publish() {
+      if (this.isPreset || this.publishing) return;
+      if (this.dirty) {
+        const ok = await window.ui.confirm({title: 'Unsaved changes', message: 'Publishing uses the saved pipeline. Save your changes and continue?', confirmText: 'Save and continue'});
+        if (!ok) return;
+        await this.save();
+        if (this.dirty) return;
+      }
+      const pub = this.publication;
+      const next = pub ? `v${pub.latest_version + 1}` : 'v1';
+      const answer = await window.ui.prompt({
+        title: `Publish ${next}`,
+        message: 'Everyone on this Photon instance will be able to run and fork this version, including the code of any custom nodes it uses. Published versions never change.',
+        label: pub ? 'What changed?' : 'Notes (optional)',
+        placeholder: pub ? 'e.g. tuned the threshold for low-contrast scans' : '',
+        multiline: true,
+        confirmText: 'Publish',
+        checkbox: {label: 'Show my latest output of this pipeline as the card image (visible to everyone)', checked: true},
+      });
+      if (answer === null) return;
+      this.publishing = true;
+      try {
+        const res = await fetch(`/api/pipelines/${this.pipelineId}/publish`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({changelog: answer.value, thumbnail: answer.checked}),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          this.issues = data.issues || [];
+          this._toast(data.error || 'Publish failed', 'error');
+          return;
+        }
+        this.publication = {published_id: data.published_id, latest_version: data.version, unpublished: false};
+        let note = data.created ? `Published v${data.version}.` : `No changes since v${data.version}; nothing new published.`;
+        if (answer.checked && !data.thumbnail) note += ' No card image yet: run this pipeline once, then publish again.';
+        else if (answer.checked && !data.created) note += ' Card image refreshed.';
+        this._toast(note, data.created ? 'success' : 'info');
+      } finally {
+        this.publishing = false;
+      }
+    },
+
+    async unpublish() {
+      if (!this.publication) return;
+      const ok = await window.ui.confirm({title: 'Unpublish pipeline?', message: 'Colleagues can no longer see or run it. Its versions are kept, and publishing again restores it.', confirmText: 'Unpublish', danger: true});
+      if (!ok) return;
+      const res = await fetch(`/api/published/${this.publication.published_id}/unpublish`, {method: 'POST'});
+      if (res.ok) { this.publication = {...this.publication, unpublished: true}; this._toast('Unpublished.', 'success'); }
+      else this._toast('Unpublish failed', 'error');
+    },
+
+    async fork() {
+      const res = await fetch(`/api/published/${this.publishedId}/fork`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({version: this.publishedVersion}),
+      });
+      const data = await res.json();
+      if (res.ok) window.location.href = `/pipelines/${data.pipeline_id}`;
+      else this._toast(data.error || 'Fork failed', 'error');
+    },
+
+    switchVersion(v) {
+      window.location.href = `/published/${this.publishedId}?version=${v}`;
     },
 
     async run() {
@@ -401,13 +676,16 @@ function pipelineEditor(pipelineId) {
       this.running = true;
       this.runError = null;
       this.nodePreviews = {};
+      this.nodeValues = {};
       const graph = this._exportGraph();
 
       try {
         const res = await fetch(`/api/sessions/${this.selectedSessionId}/run-pipeline`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({graph, title: this.title}),
+          body: JSON.stringify(this.publishedId
+            ? {published_id: this.publishedId, version: this.publishedVersion}
+            : {graph, title: this.title}),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -430,14 +708,104 @@ function pipelineEditor(pipelineId) {
         if (ev.event === 'node_previews') {
           this.nodePreviews = {...this.nodePreviews, ...ev.previews};
         }
+        if (ev.event === 'node_values' && ev.image_slot === 0) {
+          this.nodeValues = {...this.nodeValues, ...ev.values};
+        }
         if (ev.event === 'pipeline_error') {
           this.runError = `${ev.failed_node || 'pipeline'}: ${ev.message}`;
+        }
+        if (ev.event === 'model_saved') {
+          this.savedModels = [ev.model, ...this.savedModels];
+          window.ui && window.ui.toast(`Saved model "${ev.model.name}" (${ev.model.estimator}).`, 'success');
         }
       };
       es.onerror = () => { es.close(); this.running = false; };
     },
 
-    zoomIn() { this.editor && this.editor.zoom_in(); },
-    zoomOut() { this.editor && this.editor.zoom_out(); },
+    // --- layout ------------------------------------------------------------
+
+    _nodeSize(dfId) {
+      const el = document.getElementById(`node-${dfId}`);
+      return el ? {w: el.offsetWidth || 180, h: el.offsetHeight || 80} : {w: 180, h: 80};
+    },
+
+    // Arrange every node left to right in dependency order (graphLayout.js).
+    prettify({markDirty = true} = {}) {
+      if (!this.editor || typeof layoutGraph !== 'function') return;
+      const data = this.editor.drawflow.drawflow.Home.data;
+      const ids = Object.keys(data);
+      if (!ids.length) return;
+      const edges = [];
+      for (const [id, n] of Object.entries(data)) {
+        for (const out of Object.values(n.outputs || {})) {
+          for (const c of out.connections || []) edges.push([id, String(c.node)]);
+        }
+      }
+      const pos = layoutGraph(ids, edges, id => this._nodeSize(id), {gapX: 70, gapY: 28});
+      for (const id of ids) {
+        const p = pos[id];
+        data[id].pos_x = 40 + p.x;
+        data[id].pos_y = 40 + p.y;
+        const el = document.getElementById(`node-${id}`);
+        if (el) { el.style.left = `${data[id].pos_x}px`; el.style.top = `${data[id].pos_y}px`; }
+      }
+      for (const id of ids) this.editor.updateConnectionNodes(`node-${id}`);
+      if (markDirty && !this.isPreset) this.dirty = true;
+      this.fitView();
+    },
+
+    // Zoom and pan so every node is visible (Drawflow scales around the
+    // canvas centre: translate = (centre - bbox centre) * zoom).
+    fitView() {
+      if (!this.editor) return;
+      const data = this.editor.drawflow.drawflow.Home.data;
+      const ids = Object.keys(data);
+      if (!ids.length) return;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const id of ids) {
+        const {w, h} = this._nodeSize(id);
+        x0 = Math.min(x0, data[id].pos_x); y0 = Math.min(y0, data[id].pos_y);
+        x1 = Math.max(x1, data[id].pos_x + w); y1 = Math.max(y1, data[id].pos_y + h);
+      }
+      const box = this.$refs.canvas.getBoundingClientRect();
+      const pad = 60;
+      const z = Math.max(this.editor.zoom_min,
+                         Math.min(1.1, (box.width - pad) / (x1 - x0), (box.height - pad) / (y1 - y0)));
+      this._setView(z, (box.width / 2 - (x0 + x1) / 2) * z, (box.height / 2 - (y0 + y1) / 2) * z);
+    },
+
+    _setView(z, tx, ty) {
+      const ed = this.editor;
+      ed.zoom = z;
+      ed.zoom_last_value = z;
+      ed.canvas_x = tx;
+      ed.canvas_y = ty;
+      ed.precanvas.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
+      ed.dispatch('zoom', z);
+    },
+
+    // Zoom by `factor`, keeping the canvas point under (clientX, clientY) fixed.
+    // Drawflow scales around the canvas centre C: screen = C + (p - C)*z + t.
+    _zoomAt(clientX, clientY, factor) {
+      const ed = this.editor;
+      if (!ed) return;
+      const z = ed.zoom;
+      const z2 = Math.min(ed.zoom_max, Math.max(ed.zoom_min, z * factor));
+      if (z2 === z) return;
+      const r = this.$refs.canvas.getBoundingClientRect();
+      const cx = r.width / 2, cy = r.height / 2;
+      const mx = clientX - r.left, my = clientY - r.top;
+      const px = cx + (mx - cx - ed.canvas_x) / z;      // canvas point under the cursor
+      const py = cy + (my - cy - ed.canvas_y) / z;
+      this._setView(z2, mx - cx - (px - cx) * z2, my - cy - (py - cy) * z2);
+    },
+
+    _zoomCenter(factor) {
+      const r = this.$refs.canvas.getBoundingClientRect();
+      this._zoomAt(r.left + r.width / 2, r.top + r.height / 2, factor);
+    },
+
+    zoomIn() { this.editor && this._zoomCenter(1.2); },
+    zoomOut() { this.editor && this._zoomCenter(1 / 1.2); },
   };
 }

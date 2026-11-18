@@ -19,6 +19,7 @@ import requests
 from flask import Blueprint, jsonify, request
 
 from ..config import config
+from ..core.auth.middleware import login_required
 from ..core.llm.client import get_openrouter_model, set_openrouter_model
 
 llm_bp = Blueprint("llm", __name__)
@@ -50,6 +51,7 @@ def _fetch_openrouter_models() -> list[str]:
 
 
 @llm_bp.route("/llm/info", methods=["GET"])
+@login_required
 def llm_info():
     """Active provider/model; includes selectable model list for openrouter."""
     provider = config.LLM_PROVIDER.lower()
@@ -69,6 +71,7 @@ def llm_info():
 
 
 @llm_bp.route("/llm/model", methods=["POST"])
+@login_required
 def set_model():
     """Switch the active OpenRouter model (runtime only; resets on restart)."""
     if config.LLM_PROVIDER.lower() != "openrouter":

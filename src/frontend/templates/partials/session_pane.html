@@ -191,6 +191,19 @@
                     </div>
                   </template>
 
+                  <!-- non-image outputs (first image) -->
+                  <template x-if="msg.nodeValues && Object.keys(msg.nodeValues).length">
+                    <div class="px-4 pb-3 space-y-0.5">
+                      <template x-for="[nid, ports] in Object.entries(msg.nodeValues)" :key="nid">
+                        <template x-for="[port, v] in Object.entries(ports)" :key="nid + port">
+                          <p class="text-[11px] font-mono text-gray-400 break-all">
+                            <span class="text-gray-500" x-text="`${nid}.${port} = `"></span><span x-text="(JSON.stringify(v) || '').slice(0, 300)"></span>
+                          </p>
+                        </template>
+                      </template>
+                    </div>
+                  </template>
+
                   <!-- validation issues -->
                   <template x-if="msg.pipelineIssues && msg.pipelineIssues.length">
                     <div class="px-4 py-2 bg-amber-500/10 text-amber-400 text-xs space-y-0.5">
@@ -209,11 +222,16 @@
 
                   <!-- footer: save to library -->
                   <div class="px-4 py-2 border-t border-gray-700/50 flex items-center justify-between">
-                    <span class="text-[11px] text-gray-500" x-text="`${(msg.pipeline?.nodes || []).length} nodes`"></span>
+                    <span class="text-[11px] text-gray-500 truncate">
+                      <span x-text="`${(msg.pipeline?.nodes || []).length} nodes`"></span>
+                      <template x-if="msg.pipeline?.published">
+                        <span x-text="` · shared: ${msg.pipeline.published.title} v${msg.pipeline.published.version} by ${msg.pipeline.published.owner}`"></span>
+                      </template>
+                    </span>
                     <template x-if="!msg.savedPipelineId">
                       <button @click="savePipelineToLibrary(msg)" :disabled="msg.savingPipeline"
                               class="text-[11px] text-gray-400 hover:text-indigo-400 transition-colors disabled:opacity-50">
-                        <span x-show="!msg.savingPipeline">Save to my pipelines</span>
+                        <span x-show="!msg.savingPipeline" x-text="msg.pipeline?.published ? 'Fork to my pipelines' : 'Save to my pipelines'"></span>
                         <span x-show="msg.savingPipeline">Saving...</span>
                       </button>
                     </template>
@@ -223,7 +241,7 @@
                       </template>
                       <button @click="openPipelineInEditor(msg)" :disabled="msg.savingPipeline"
                               class="text-[11px] text-gray-400 hover:text-indigo-400 transition-colors disabled:opacity-50">
-                        Open in editor
+                        <span x-text="msg.pipeline?.published && !msg.savedPipelineId ? 'Open shared pipeline' : 'Open in editor'"></span>
                       </button>
                     </div>
                   </div>

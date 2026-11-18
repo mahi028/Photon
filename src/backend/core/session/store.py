@@ -25,6 +25,35 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
+def _migrate_model_tables(conn) -> None:
+    """D-049: fold trained_models (D-044) and seg_models (D-047) into `models`,
+    keeping ids (pipelines refer to them) and files where they are; then drop
+    the old tables. Runs inside init_db's transaction; idempotent."""
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "trained_models" in names:
+        for r in conn.execute("SELECT * FROM trained_models").fetchall():
+            r = dict(r)
+            spec = {"estimator": r["estimator"], "versions": json.loads(r["versions_json"] or "{}"),
+                    "session_id": r["session_id"], "pipeline_title": r["pipeline_title"],
+                    "summary": r["summary"]}
+            conn.execute("""INSERT OR IGNORE INTO models (model_id, user_id, kind, name, file, size_bytes,
+                            sha256, status, error, spec_json, info_json, created_at, published, deleted_at)
+                            VALUES (?, ?, 'sklearn', ?, ?, ?, NULL, 'ready', NULL, ?, NULL, ?, ?, ?)""",
+                         (r["model_id"], r["user_id"], r["name"], f"trained_models/{r['model_id']}.skops",
+                          r["size_bytes"], json.dumps(spec), r["created_at"], r["published"], r["deleted_at"]))
+        conn.execute("DROP TABLE trained_models")
+    if "seg_models" in names:
+        for r in conn.execute("SELECT * FROM seg_models").fetchall():
+            r = dict(r)
+            conn.execute("""INSERT OR IGNORE INTO models (model_id, user_id, kind, name, file, size_bytes,
+                            sha256, status, error, spec_json, info_json, created_at, published, deleted_at)
+                            VALUES (?, ?, 'segmentation', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         (r["model_id"], r["user_id"], r["name"], f"model_weights/{r['weights_file']}",
+                          r["size_bytes"], r["sha256"], r["status"], r["error"], r["spec_json"],
+                          r["info_json"], r["created_at"], r["published"], r["deleted_at"]))
+        conn.execute("DROP TABLE seg_models")
+
+
 def init_db():
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
@@ -156,7 +185,178 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
             )
         """)
+        # API keys for programmatic access (MCP server). Only a SHA-256 hash of
+        # the key is stored; the plaintext is shown to the user once at creation.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                key_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                prefix TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                expires_at TEXT,
+                revoked_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id)")
+        # Models (D-049): every model a user has, one row each. kind sklearn
+        # (made by ml_save_model, a .skops file) or segmentation (uploaded
+        # weights + spec, checked before use). `file` is relative to volumes/.
+        # Rows are never rewritten except status / published / deleted_at;
+        # published=1 means a published pipeline uses it: anyone running that
+        # pipeline may load it, and deleting only hides it (the file stays).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS models (
+                model_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                file TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                spec_json TEXT NOT NULL,
+                info_json TEXT,
+                created_at TEXT NOT NULL,
+                published INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_models_user ON models (user_id, kind)")
+        _migrate_model_tables(conn)
+        # Label images painted in the UI (D-044): volumes/annotations/<id>.png,
+        # uint8, 0 = unlabeled, 1..N = classes. One per (user, image, name).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS annotations (
+                annotation_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                image_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                classes_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_user_image ON annotations (user_id, image_id)")
+        # Batch runs (D-046): one pipeline over many images, in the background.
+        # graph_json / customs_json are frozen at creation (edits don't touch a
+        # running batch); runner_pid lets a restart tell its own dead batches
+        # from ones another process (the MCP server) is still running.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS batches (
+                batch_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                source_json TEXT,
+                graph_json TEXT NOT NULL,
+                customs_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                runner_pid INTEGER,
+                cancel_requested INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_user ON batches (user_id, created_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS batch_items (
+                batch_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                image_id TEXT NOT NULL,
+                filename TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                values_json TEXT,
+                outputs_json TEXT,
+                tables_json TEXT,
+                seconds REAL,
+                PRIMARY KEY (batch_id, idx)
+            )
+        """)
+        # Published pipelines (D-035): an instance-wide, immutable, versioned
+        # snapshot of a user's pipeline. Each version freezes the graph AND the
+        # code of every custom node it uses, so runs by other users never
+        # depend on the author's live (editable, per-user) library.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS published_pipelines (
+                published_id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                source_pipeline_id TEXT UNIQUE,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                latest_version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                unpublished_at TEXT,
+                FOREIGN KEY (owner_id) REFERENCES users (user_id) ON DELETE CASCADE,
+                FOREIGN KEY (source_pipeline_id) REFERENCES pipelines (pipeline_id) ON DELETE SET NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS published_pipeline_versions (
+                published_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                graph_json TEXT NOT NULL,
+                custom_nodes_json TEXT NOT NULL DEFAULT '{}',
+                changelog TEXT NOT NULL DEFAULT '',
+                published_at TEXT NOT NULL,
+                PRIMARY KEY (published_id, version),
+                FOREIGN KEY (published_id) REFERENCES published_pipelines (published_id) ON DELETE CASCADE
+            )
+        """)
         _seed_presets(conn)
+        # --- additive migrations (run after every CREATE TABLE) ---
+        # Uploader of each image (D-037). NULL for images from before this
+        # column: those are reachable only through a session that lists them.
+        try:
+            conn.execute("ALTER TABLE images ADD COLUMN owner_id TEXT")
+        except Exception:
+            pass
+        # When status last changed: lets a 'running' left behind by a crashed
+        # process expire instead of locking the session forever.
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN status_at TEXT")
+        except Exception:
+            pass
+        # Library versions a published version was made with (D-041), e.g.
+        # {"scikit-image": "0.25.2", "numpy": "2.2.0"}. NULL for older rows.
+        try:
+            conn.execute("ALTER TABLE published_pipeline_versions ADD COLUMN env_json TEXT")
+        except Exception:
+            pass
+        # What an API key may do (D-043): read < run < write. Keys from before
+        # this column had full access, so they default to 'write'.
+        try:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'")
+        except Exception:
+            pass
+        # Batch rows: a preview of the last image a node made, for graphs whose
+        # images all feed further nodes (no final output to show). D-046.
+        try:
+            conn.execute("ALTER TABLE batch_items ADD COLUMN preview_json TEXT")
+        except Exception:
+            pass
+        # Where a batch also writes its results on the server's disk (an
+        # allow-listed folder, like a Slurm job's output dir). NULL = only in Photon.
+        try:
+            conn.execute("ALTER TABLE batches ADD COLUMN output_dir TEXT")
+        except Exception:
+            pass
+        # A user's default folder for batch results (D-050); NULL = none.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN output_dir TEXT")
+        except Exception:
+            pass
 
 
 def _seed_presets(conn) -> None:
@@ -181,6 +381,8 @@ def save_session(sess: Session) -> None:
     # UPSERT, NOT "INSERT OR REPLACE": REPLACE is implemented as DELETE+INSERT,
     # and with PRAGMA foreign_keys=ON the DELETE cascades — silently wiping the
     # session's messages and outputs on every status update (see D-012).
+    # status is NOT updated here: only claim_session_run/set_session_status
+    # write it, so a stale cached copy can't overwrite another process's run.
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
             INSERT INTO sessions
@@ -190,7 +392,6 @@ def save_session(sess: Session) -> None:
             ON CONFLICT(session_id) DO UPDATE SET
                 title = excluded.title,
                 updated_at = excluded.updated_at,
-                status = excluded.status,
                 current_code = excluded.current_code,
                 image_ids_json = excluded.image_ids_json
         """, (
@@ -199,20 +400,44 @@ def save_session(sess: Session) -> None:
             json.dumps(sess.image_ids),
         ))
 
-def save_image(metadata: ImageMetadata) -> None:
+def save_image(metadata: ImageMetadata, owner_id: Optional[str] = None) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("""
             INSERT OR REPLACE INTO images
             (image_id, original_filename, shape, dtype, channel_count, size_bytes,
-             size_mb, guessed_kind, value_range, path, preview_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             size_mb, guessed_kind, value_range, path, preview_path, owner_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             metadata.image_id, metadata.original_filename,
             json.dumps(list(metadata.shape)), metadata.dtype,
             metadata.channel_count, metadata.size_bytes, metadata.size_mb,
             metadata.guessed_kind, json.dumps(list(metadata.value_range)),
-            metadata.path, metadata.preview_path,
+            metadata.path, metadata.preview_path, owner_id,
         ))
+
+
+def user_can_access_image(user_id: str, image_id: str) -> bool:
+    """Uploader, or the owner of any session that lists the image (covers
+    images from before owner_id existed and images cloned via share links)."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT owner_id FROM images WHERE image_id = ?", (image_id,)).fetchone()
+        if row is None:
+            return False
+        if row["owner_id"] == user_id:
+            return True
+        rows = conn.execute(
+            "SELECT image_ids_json FROM sessions WHERE user_id = ? AND image_ids_json LIKE ?",
+            (user_id, f"%{image_id}%")).fetchall()
+        return any(image_id in json.loads(r["image_ids_json"] or "[]") for r in rows)
+
+
+def image_id_for_upload_file(filename: str) -> Optional[str]:
+    """volumes/uploads/<image_id>[_preview].<ext> -> image_id if registered."""
+    stem = Path(filename).name.split(".", 1)[0]
+    stem = stem[:-len("_preview")] if stem.endswith("_preview") else stem
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT image_id FROM images WHERE image_id = ?", (stem,)).fetchone()
+        return row["image_id"] if row else None
 
 def load_image(image_id: str) -> Optional[ImageMetadata]:
     with closing(_get_conn()) as conn, conn:
@@ -321,6 +546,42 @@ def list_session_summaries(user_id: str) -> List[Dict[str, Any]]:
                 "image_count": len(image_ids),
             })
         return summaries
+
+def load_session_updated_at(session_id: str) -> Optional[str]:
+    """Cheap staleness probe for the SessionManager cache (one indexed row)."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT updated_at FROM sessions WHERE session_id = ?",
+                           (session_id,)).fetchone()
+        return row["updated_at"] if row else None
+
+
+def load_session_version(session_id: str) -> Optional[tuple]:
+    """(updated_at, status): what the SessionManager cache compares against.
+    status is included because it changes without bumping updated_at."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT updated_at, status FROM sessions WHERE session_id = ?",
+                           (session_id,)).fetchone()
+        return (row["updated_at"], row["status"]) if row else None
+
+
+def claim_session_run(session_id: str, now: str, stale_before: str) -> bool:
+    """Atomically idle -> running, across processes (Flask workers, MCP
+    server). A 'running' older than stale_before counts as abandoned."""
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute(
+            "UPDATE sessions SET status = 'running', status_at = ? WHERE session_id = ? "
+            "AND (status != 'running' OR status_at IS NULL OR status_at < ?)",
+            (now, session_id, stale_before))
+        return cur.rowcount == 1
+
+
+def set_session_status(session_id: str, status: str, now: str) -> None:
+    """Status only: never rewrites the rest of the row (which another process
+    may have changed since this one cached it)."""
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE sessions SET status = ?, status_at = ? WHERE session_id = ?",
+                     (status, now, session_id))
+
 
 def load_session(session_id: str) -> Optional[Session]:
     with closing(_get_conn()) as conn, conn:
@@ -464,6 +725,17 @@ def find_user_by_provider(provider: str, provider_id: str) -> Optional[Dict[str,
         return dict(row) if row else None
 
 
+def get_user_output_dir(user_id: str) -> Optional[str]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT output_dir FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return r[0] if r else None
+
+
+def set_user_output_dir(user_id: str, output_dir: Optional[str]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET output_dir = ? WHERE user_id = ?", (output_dir, user_id))
+
+
 def update_user_login(user_id: str, last_login: str) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute(
@@ -586,3 +858,440 @@ def delete_custom_node(custom_node_id: str, user_id: str) -> None:
     with closing(_get_conn()) as conn, conn:
         conn.execute("DELETE FROM custom_nodes WHERE custom_node_id = ? AND user_id = ?",
                      (custom_node_id, user_id))
+
+
+# ---------------------------------------------------------------------------
+# Published pipelines
+# ---------------------------------------------------------------------------
+
+_PUB_SELECT = """
+    SELECT p.*, u.username AS owner_username, u.display_name AS owner_display_name,
+           v.published_at AS latest_published_at, v.graph_json AS latest_graph_json
+    FROM published_pipelines p
+    JOIN users u ON u.user_id = p.owner_id
+    JOIN published_pipeline_versions v
+      ON v.published_id = p.published_id AND v.version = p.latest_version
+"""
+
+
+def _pub_row_to_dict(row) -> Dict[str, Any]:
+    graph = json.loads(row["latest_graph_json"])
+    return {
+        "published_id": row["published_id"],
+        "owner_id": row["owner_id"],
+        "owner_username": row["owner_username"],
+        "owner_display_name": row["owner_display_name"],
+        "source_pipeline_id": row["source_pipeline_id"],
+        "title": row["title"],
+        "description": row["description"],
+        "latest_version": row["latest_version"],
+        "node_count": len(graph.get("nodes") or []),
+        "uses_custom_nodes": any(n.get("custom_node_id") for n in graph.get("nodes") or []),
+        "ops": [n.get("op") or "custom" for n in graph.get("nodes") or []],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "latest_published_at": row["latest_published_at"],
+        "unpublished_at": row["unpublished_at"],
+    }
+
+
+def list_published_pipelines(include_unpublished_of: Optional[str] = None) -> List[Dict[str, Any]]:
+    """All live publications, newest first. include_unpublished_of=user_id also
+    returns that user's unpublished ones (so owners can see and re-publish)."""
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute(_PUB_SELECT + """
+            WHERE p.unpublished_at IS NULL OR p.owner_id = ?
+            ORDER BY p.updated_at DESC
+        """, (include_unpublished_of or "",)).fetchall()
+        return [_pub_row_to_dict(r) for r in rows]
+
+
+def load_published_pipeline(published_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute(_PUB_SELECT + " WHERE p.published_id = ?",
+                           (published_id,)).fetchone()
+        return _pub_row_to_dict(row) if row else None
+
+
+def find_published_by_source(pipeline_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute(_PUB_SELECT + " WHERE p.source_pipeline_id = ?",
+                           (pipeline_id,)).fetchone()
+        return _pub_row_to_dict(row) if row else None
+
+
+def list_published_versions(published_id: str) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT version, title, changelog, published_at FROM published_pipeline_versions
+            WHERE published_id = ? ORDER BY version DESC
+        """, (published_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def load_published_version(published_id: str, version: int) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("""
+            SELECT * FROM published_pipeline_versions WHERE published_id = ? AND version = ?
+        """, (published_id, version)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["graph"] = json.loads(d.pop("graph_json"))
+        d["custom_nodes"] = json.loads(d.pop("custom_nodes_json"))
+        d["environment"] = json.loads(d.pop("env_json", None) or "{}")
+        return d
+
+
+def add_published_version(published_id: str, owner_id: str, source_pipeline_id: str,
+                          title: str, description: str, graph: dict,
+                          custom_nodes: dict, changelog: str, now: str,
+                          environment: Optional[dict] = None) -> int:
+    """Create the publication if needed and append the next version, atomically.
+    Re-publishing also clears unpublished_at. Returns the new version number."""
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT latest_version FROM published_pipelines WHERE published_id = ?",
+                           (published_id,)).fetchone()
+        version = (row["latest_version"] + 1) if row else 1
+        if row:
+            conn.execute("""
+                UPDATE published_pipelines SET title = ?, description = ?, latest_version = ?,
+                       updated_at = ?, unpublished_at = NULL
+                WHERE published_id = ?
+            """, (title, description, version, now, published_id))
+        else:
+            conn.execute("""
+                INSERT INTO published_pipelines (published_id, owner_id, source_pipeline_id,
+                    title, description, latest_version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (published_id, owner_id, source_pipeline_id, title, description,
+                  version, now, now))
+        conn.execute("""
+            INSERT INTO published_pipeline_versions (published_id, version, title, description,
+                graph_json, custom_nodes_json, changelog, published_at, env_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (published_id, version, title, description, json.dumps(graph),
+              json.dumps(custom_nodes), changelog, now, json.dumps(environment or {})))
+        return version
+
+
+def set_published_unpublished(published_id: str, owner_id: str, unpublished_at: Optional[str]) -> bool:
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("""
+            UPDATE published_pipelines SET unpublished_at = ?
+            WHERE published_id = ? AND owner_id = ?
+        """, (unpublished_at, published_id, owner_id))
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# API keys
+# ---------------------------------------------------------------------------
+
+def create_api_key(key_id: str, user_id: str, name: str, key_hash: str, prefix: str,
+                   created_at: str, expires_at: Optional[str], scope: str = "write") -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO api_keys (key_id, user_id, name, key_hash, prefix, created_at, expires_at, scope)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (key_id, user_id, name, key_hash, prefix, created_at, expires_at, scope))
+
+
+def list_api_keys(user_id: str) -> List[Dict[str, Any]]:
+    """A user's keys, newest first. Never includes the hash."""
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT key_id, name, prefix, scope, created_at, last_used_at, expires_at, revoked_at
+            FROM api_keys WHERE user_id = ? ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def find_api_key_by_hash(key_hash: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT * FROM api_keys WHERE key_hash = ?", (key_hash,)).fetchone()
+        return dict(row) if row else None
+
+
+def revoke_api_key(key_id: str, user_id: str, revoked_at: str) -> bool:
+    """Owner-scoped revoke. Returns False if the key isn't the user's or is already revoked."""
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("""
+            UPDATE api_keys SET revoked_at = ?
+            WHERE key_id = ? AND user_id = ? AND revoked_at IS NULL
+        """, (revoked_at, key_id, user_id))
+        return cur.rowcount > 0
+
+
+def touch_api_key(key_id: str, used_at: str) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE api_keys SET last_used_at = ? WHERE key_id = ?", (used_at, key_id))
+
+
+# ---------------------------------------------------------------------------
+# Saved models and annotations (D-044)
+# ---------------------------------------------------------------------------
+
+def _annotation_row(r) -> Dict[str, Any]:
+    d = dict(r)
+    d["classes"] = json.loads(d.pop("classes_json") or "[]")
+    return d
+
+
+def upsert_annotation(row: Dict[str, Any]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO annotations (annotation_id, user_id, image_id, name, width, height,
+                                     classes_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(annotation_id) DO UPDATE SET name = excluded.name,
+                width = excluded.width, height = excluded.height,
+                classes_json = excluded.classes_json, updated_at = excluded.updated_at
+        """, (row["annotation_id"], row["user_id"], row["image_id"], row["name"], row["width"],
+              row["height"], json.dumps(row.get("classes") or []), row["created_at"], row["updated_at"]))
+
+
+def get_annotation(annotation_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT * FROM annotations WHERE annotation_id = ?", (annotation_id,)).fetchone()
+        return _annotation_row(r) if r else None
+
+
+def list_annotations(user_id: str, image_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        if image_id:
+            rows = conn.execute("""SELECT * FROM annotations WHERE user_id = ? AND image_id = ?
+                                   ORDER BY updated_at DESC""", (user_id, image_id)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM annotations WHERE user_id = ? ORDER BY updated_at DESC",
+                                (user_id,)).fetchall()
+        return [_annotation_row(r) for r in rows]
+
+
+def delete_annotation(annotation_id: str, user_id: str) -> bool:
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("DELETE FROM annotations WHERE annotation_id = ? AND user_id = ?",
+                           (annotation_id, user_id))
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Batch runs (D-046)
+# ---------------------------------------------------------------------------
+
+def _batch_row(r) -> Dict[str, Any]:
+    d = dict(r)
+    d["source"] = json.loads(d.pop("source_json") or "{}")
+    d["graph"] = json.loads(d.pop("graph_json"))
+    d["custom_nodes"] = json.loads(d.pop("customs_json"))
+    d["cancel_requested"] = bool(d["cancel_requested"])
+    return d
+
+
+def create_batch(row: Dict[str, Any], items: List[Dict[str, Any]]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO batches (batch_id, user_id, title, source_json, graph_json, customs_json,
+                                 status, total, created_at, output_dir)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["batch_id"], row["user_id"], row["title"], json.dumps(row.get("source") or {}),
+              json.dumps(row["graph"]), json.dumps(row.get("custom_nodes") or {}), row["status"],
+              len(items), row["created_at"], row.get("output_dir")))
+        conn.executemany("""
+            INSERT INTO batch_items (batch_id, idx, image_id, filename, status) VALUES (?, ?, ?, ?, 'pending')
+        """, [(row["batch_id"], i, it["image_id"], it.get("filename")) for i, it in enumerate(items)])
+
+
+def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT * FROM batches WHERE batch_id = ?", (batch_id,)).fetchone()
+        if not r:
+            return None
+        d = _batch_row(r)
+        counts = dict(conn.execute("SELECT status, COUNT(*) FROM batch_items WHERE batch_id = ? GROUP BY status",
+                                   (batch_id,)).fetchall())
+        d["counts"] = counts
+        return d
+
+
+def list_batches(user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT b.batch_id, b.title, b.status, b.total, b.created_at, b.started_at, b.finished_at,
+                   b.source_json,
+                   SUM(CASE WHEN i.status = 'done' THEN 1 ELSE 0 END) AS done,
+                   SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failed
+            FROM batches b LEFT JOIN batch_items i ON i.batch_id = b.batch_id
+            WHERE b.user_id = ? GROUP BY b.batch_id ORDER BY b.created_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["source"] = json.loads(d.pop("source_json") or "{}")
+            out.append(d)
+        return out
+
+
+def update_batch(batch_id: str, **fields) -> None:
+    allowed = {"status", "started_at", "finished_at", "runner_pid", "cancel_requested"}
+    keys = [k for k in fields if k in allowed]
+    if not keys:
+        return
+    with closing(_get_conn()) as conn, conn:
+        conn.execute(f"UPDATE batches SET {', '.join(k + ' = ?' for k in keys)} WHERE batch_id = ?",
+                     [fields[k] for k in keys] + [batch_id])
+
+
+def list_batch_items(batch_id: str, statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        if statuses:
+            rows = conn.execute(f"""SELECT * FROM batch_items WHERE batch_id = ? AND status IN
+                                    ({','.join('?' * len(statuses))}) ORDER BY idx""",
+                                [batch_id, *statuses]).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM batch_items WHERE batch_id = ? ORDER BY idx",
+                                (batch_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("values", "outputs", "tables"):
+                d[k] = json.loads(d.pop(f"{k}_json") or ("{}" if k == "values" else "[]"))
+            d["preview"] = json.loads(d.pop("preview_json", None) or "null")
+            out.append(d)
+        return out
+
+
+def update_batch_item(batch_id: str, idx: int, **fields) -> None:
+    cols = {"status": "status", "error": "error", "seconds": "seconds",
+            "values": "values_json", "outputs": "outputs_json", "tables": "tables_json",
+            "preview": "preview_json"}
+    keys = [k for k in fields if k in cols]
+    vals = [json.dumps(fields[k]) if k in ("values", "outputs", "tables", "preview") else fields[k]
+            for k in keys]
+    with closing(_get_conn()) as conn, conn:
+        conn.execute(f"UPDATE batch_items SET {', '.join(cols[k] + ' = ?' for k in keys)} "
+                     "WHERE batch_id = ? AND idx = ?", vals + [batch_id, idx])
+
+
+def reset_running_batch_items(batch_id: str) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE batch_items SET status = 'pending' WHERE batch_id = ? AND status = 'running'",
+                     (batch_id,))
+
+
+def claim_batch(batch_id: str, old_pid: Optional[int], new_pid: int) -> bool:
+    """Atomically take over a batch whose runner died. True if this process won."""
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("""UPDATE batches SET runner_pid = ? WHERE batch_id = ?
+                              AND status IN ('queued', 'running') AND runner_pid IS ?""",
+                           (new_pid, batch_id, old_pid))
+        return cur.rowcount > 0
+
+
+def active_batches() -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("SELECT batch_id, runner_pid FROM batches WHERE status IN ('queued', 'running')").fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_batch(batch_id: str, user_id: str) -> bool:
+    with closing(_get_conn()) as conn, conn:
+        cur = conn.execute("DELETE FROM batches WHERE batch_id = ? AND user_id = ?", (batch_id, user_id))
+        if cur.rowcount:
+            conn.execute("DELETE FROM batch_items WHERE batch_id = ?", (batch_id,))
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Models (D-049) — see core/models/records.py
+# ---------------------------------------------------------------------------
+
+def _model_row(r) -> Dict[str, Any]:
+    d = dict(r)
+    d["spec"] = json.loads(d.pop("spec_json") or "{}")
+    d["info"] = json.loads(d.pop("info_json") or "{}")
+    d["published"] = bool(d["published"])
+    return d
+
+
+def add_model(row: Dict[str, Any]) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("""
+            INSERT INTO models (model_id, user_id, kind, name, file, size_bytes, sha256, status,
+                                error, spec_json, info_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["model_id"], row["user_id"], row["kind"], row["name"], row["file"], row["size_bytes"],
+              row.get("sha256"), row.get("status", "ready"), row.get("error"), json.dumps(row.get("spec") or {}),
+              json.dumps(row.get("info") or {}), row["created_at"]))
+
+
+def get_model(model_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        r = conn.execute("SELECT * FROM models WHERE model_id = ?", (model_id,)).fetchone()
+        return _model_row(r) if r else None
+
+
+def list_models(user_id: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    """A user's models (not deleted), newest first, optionally of one kind."""
+    with closing(_get_conn()) as conn, conn:
+        sql = "SELECT * FROM models WHERE user_id = ? AND deleted_at IS NULL"
+        args: list = [user_id]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        return [_model_row(r) for r in conn.execute(sql + " ORDER BY created_at DESC", args).fetchall()]
+
+
+def models_with_status(status: str, kind: Optional[str] = None) -> List[str]:
+    with closing(_get_conn()) as conn, conn:
+        sql = "SELECT model_id FROM models WHERE status = ? AND deleted_at IS NULL"
+        args: list = [status]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        return [r[0] for r in conn.execute(sql, args)]
+
+
+def update_model(model_id: str, **fields) -> None:
+    cols = {"status": "status", "error": "error", "info": "info_json", "deleted_at": "deleted_at",
+            "published": "published"}
+    keys = [k for k in fields if k in cols]
+    if not keys:
+        return
+    vals = [json.dumps(fields[k]) if k == "info" else fields[k] for k in keys]
+    with closing(_get_conn()) as conn, conn:
+        conn.execute(f"UPDATE models SET {', '.join(cols[k] + ' = ?' for k in keys)} WHERE model_id = ?",
+                     vals + [model_id])
+
+
+def load_user(user_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_users() -> List[Dict[str, Any]]:
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute(
+            "SELECT user_id, username, email, provider, display_name, created_at, last_login "
+            "FROM users ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_user_password(user_id: str, password_hash: str) -> None:
+    with closing(_get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", (password_hash, user_id))
+
+
+def recent_outputs_for_user(user_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """A user's newest outputs across their sessions: {path, code, produced_at}.
+    `code` is the provenance (for pipeline runs, the graph JSON)."""
+    with closing(_get_conn()) as conn, conn:
+        rows = conn.execute("""
+            SELECT o.path, o.code, o.produced_at
+            FROM outputs o JOIN sessions s ON s.session_id = o.session_id
+            WHERE s.user_id = ?
+            ORDER BY o.produced_at DESC, o.id DESC
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+        return [dict(r) for r in rows]

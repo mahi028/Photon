@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import subprocess
 import sys
 import tempfile
@@ -25,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ...config import config
+from ..sandbox import limits
 
 _CHILD = r'''
 import json, sys, traceback
@@ -34,6 +34,32 @@ import numpy as np
 sys.path.insert(0, JOB["repo_root"])
 from src.backend.core.pipeline import runner  # noqa: E402
 from src.backend.core.pipeline.types import PortType, infer_type  # noqa: E402
+from src.backend.core.sandbox import guard  # noqa: E402
+from PIL import Image  # noqa: E402
+
+# Read the input while the process is still unrestricted-by-hook, then lock
+# down before any custom node code is compiled or run (D-036).
+_INPUT = np.asarray(Image.open(JOB["input_path"]).convert(JOB["input_mode"]))
+import src.backend.core.models.sidecar  # noqa: E402,F401  (model ops import it lazily)
+src.backend.core.models.sidecar.GRANTS = JOB.get("model_grants") or {}   # uploaded models (D-047)
+from src.backend.core.pipeline.ops import ml as _ml  # noqa: E402
+_ml.RUNTIME["assets"] = JOB.get("assets") or {}       # staged saved models / labels (D-044)
+_ml.RUNTIME["save_dir"] = str(Path(JOB["output_dir"]) / "models")
+if any(n.get("op") in ("ml_save_model", "ml_load_model") for n in JOB["graph"].get("nodes") or []):
+    import skops.io  # noqa: E402,F401  (loads native libs via ctypes, which the guard blocks)
+    import sklearn.utils.validation  # noqa: E402,F401
+guard.install(read_roots=guard.default_read_roots() + JOB["read_roots"],
+              write_roots=JOB["write_roots"], unix_sockets=JOB["unix_sockets"])
+
+PREVIEW_MAX = 1024
+
+def _shrink(value):
+    """Node previews are for looking at: subsample big arrays (every k-th
+    pixel) before converting, so a 10k-px slide doesn't cost a full-size JPEG
+    per node. Final outputs are still saved at full resolution."""
+    a = np.asarray(value)
+    k = int(np.ceil(max(a.shape[:2]) / PREVIEW_MAX))
+    return a[::k, ::k] if k > 1 else a
 
 def _to_preview_array(value):
     """Best-effort conversion of any port value to a saveable uint8 image."""
@@ -49,29 +75,115 @@ def _to_preview_array(value):
         arr = (arr - lo) / (hi - lo) * 255.0
     return np.clip(arr, 0, 255).astype(np.uint8)
 
+def _fname(nid):
+    """Node id -> file name. Expanded pipeline nodes are 'outer/inner' (D-045)."""
+    return "".join(c if c.isalnum() or c in "-_." else "~" for c in str(nid))
+
+_TABLES = []      # full non-image tables written as CSV (batch runs, D-046)
+
+def _write_table(nid, port, v):
+    """dict of equal-length 1-D columns (regionprops_table) or a 1-D array -> CSV."""
+    import csv
+    if isinstance(v, dict):
+        cols = {}
+        for k, c in v.items():
+            a = np.asarray(c)
+            if a.ndim == 1 and a.dtype.kind in "biufUS":
+                cols[str(k)] = a
+        lens = {len(a) for a in cols.values()}
+        if not cols or len(lens) != 1:
+            return
+    elif isinstance(v, np.ndarray) and v.ndim == 1 and v.dtype.kind in "biuf":
+        cols = {"value": v}
+    else:
+        return
+    n = len(next(iter(cols.values())))
+    if not n or n > 1_000_000:
+        return
+    d = Path(JOB["output_dir"]) / "tables"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{_fname(nid)}~{_fname(port)}.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(list(cols))
+        for row in zip(*[a.tolist() for a in cols.values()]):
+            w.writerow(row)
+    _TABLES.append({"node_id": nid, "port": port, "path": str(path), "rows": n})
+
+def _is_image(v):
+    return (isinstance(v, np.ndarray) and v.ndim in (2, 3) and min(v.shape[:2]) >= 2
+            and v.dtype.kind in "biuf")
+
+def _summary(v, depth=0):
+    """JSON-safe, size-capped view of a non-image value (D-041)."""
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    if isinstance(v, str):
+        return v[:300]
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, np.ndarray):
+        if v.size <= 32 and v.dtype.kind in "biuf":
+            return np.round(v, 6).tolist() if v.dtype.kind == "f" else v.tolist()
+        if v.dtype.kind in "biuf" and v.size:
+            return f"array shape={list(v.shape)} dtype={v.dtype} min={np.nanmin(v):.6g} max={np.nanmax(v):.6g}"
+        return f"array shape={list(v.shape)} dtype={v.dtype}"
+    if hasattr(v, "get_params") and hasattr(v, "fit"):          # sklearn model (D-042)
+        try:
+            from sklearn.utils.validation import check_is_fitted
+            check_is_fitted(v)
+            fitted = "fitted"
+        except Exception:
+            fitted = "not fitted"
+        return f"<{type(v).__name__} {fitted}: {repr(v)[:200]}>"
+    if depth >= 3:
+        return f"<{type(v).__name__}>"
+    if isinstance(v, (list, tuple)):
+        out = [_summary(x, depth + 1) for x in v[:16]]
+        return out + ([f"... {len(v) - 16} more"] if len(v) > 16 else [])
+    if isinstance(v, dict):
+        items = list(v.items())
+        out = {str(k): _summary(x, depth + 1) for k, x in items[:32]}
+        if len(items) > 32:
+            out["..."] = f"{len(items) - 32} more keys"
+        return out
+    return f"<{type(v).__name__}>"
+
 def main():
-    from PIL import Image
     graph = JOB["graph"]
     custom_nodes = JOB["custom_nodes"]
     node_dir = Path(JOB["node_preview_dir"])
     node_dir.mkdir(parents=True, exist_ok=True)
 
-    img = np.asarray(Image.open(JOB["input_path"]).convert(JOB["input_mode"]))
+    img = _INPUT
 
     events = []
     previews = {}
+    values = {}      # node -> port -> summary, for outputs that aren't images
 
     def on_node(nid, phase, payload):
         events.append({"node_id": nid, "phase": phase,
                        "message": payload.get("message")})
         if phase == "done":
             outs = payload.get("outputs") or {}
-            if not outs:
+            for port_name, v in outs.items():
+                if not _is_image(v):
+                    try:
+                        values.setdefault(nid, {})[port_name] = _summary(v)
+                    except Exception:
+                        values.setdefault(nid, {})[port_name] = f"<{type(v).__name__}>"
+                    if JOB.get("export_tables"):
+                        try:
+                            _write_table(nid, port_name, v)
+                        except Exception:
+                            pass
+            images = [(k, v) for k, v in outs.items() if _is_image(v)]
+            if not images:
                 return
-            port, value = next(iter(outs.items()))
+            port, value = images[0]
             try:
-                p = node_dir / f"{nid}.jpg"
-                Image.fromarray(_to_preview_array(value)).convert("RGB").save(p, quality=85)
+                p = node_dir / f"{_fname(nid)}.jpg"
+                Image.fromarray(_to_preview_array(_shrink(value))).convert("RGB").save(p, quality=85)
                 previews[nid] = {"port": port, "path": str(p)}
             except Exception:
                 pass   # a preview failing must never fail the run
@@ -82,9 +194,13 @@ def main():
     for nid in result["terminal"]:
         outs = result["results"].get(nid) or {}
         for port, value in outs.items():
-            out_path = Path(JOB["output_dir"]) / f"{nid}_{port}.png"
+            if not _is_image(value):
+                continue            # reported in `values`, not saved as an image
+            out_path = Path(JOB["output_dir"]) / f"{_fname(nid)}_{port}.png"
             Path(JOB["output_dir"]).mkdir(parents=True, exist_ok=True)
-            Image.fromarray(_to_preview_array(value)).save(out_path)
+            # compress_level 1: several times faster than the default 6 on
+            # big outputs, files somewhat larger.
+            Image.fromarray(_to_preview_array(value)).save(out_path, compress_level=1)
             finals.append({"node_id": nid, "port": port, "path": str(out_path)})
 
     json.dump({
@@ -93,6 +209,9 @@ def main():
         "events": events,
         "previews": previews,
         "finals": finals,
+        "values": values,
+        "saved_models": _ml.RUNTIME["saved"],
+        "tables": _TABLES,
     }, open(JOB["result_path"], "w"))
 
 try:
@@ -104,6 +223,18 @@ except Exception:
 '''
 
 
+def _uses_model_ops(graph: dict) -> bool:
+    from . import registry
+    for n in graph.get("nodes") or []:
+        if n.get("op"):
+            try:
+                if registry.get_op(n["op"]).requires_model:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def run_pipeline_subprocess(
     graph: dict,
     input_path: str,
@@ -112,16 +243,51 @@ def run_pipeline_subprocess(
     custom_nodes: dict[str, dict] | None = None,
     timeout: Optional[int] = None,
     input_mode: str = "RGB",
+    assets: dict[str, str] | None = None,
+    export_tables: bool = False,
+    model_grants: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute a graph out-of-process. Returns the child's result manifest
-    plus wall-clock timing, or a synthetic error dict on timeout/crash."""
+    plus wall-clock timing, or a synthetic error dict on timeout/crash.
+
+    assets: {"model:<id>" | "labels:<id>": file} — saved models and painted
+    labels the graph loads (D-044). Copied into the run's scratch dir, the
+    only place the guarded child can read them from."""
     timeout = timeout or config.EXECUTION_TIMEOUT_SECONDS * 4  # pipelines are multi-op
     repo_root = str(config.ROOT_DIR)
 
     scratch = Path(tempfile.mkdtemp(prefix="pipe_", dir=str(config.TMP_EXEC_DIR)))
     result_path = scratch / "result.json"
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(node_preview_dir).mkdir(parents=True, exist_ok=True)
+
+    # Model ops reach the sidecar over its Unix socket. Start it here, in the
+    # unrestricted parent: the guarded child may connect but never spawn.
+    unix_sockets: list[str] = []
+    if _uses_model_ops(graph) and config.MODEL_SIDECAR_ENABLED:
+        from ..models import sidecar
+        try:
+            sidecar.ensure_running()
+        except Exception:
+            pass                       # child reports the failure on the node
+        unix_sockets.append(str(config.MODEL_SIDECAR_SOCKET))
+        config.MODEL_IPC_DIR.mkdir(parents=True, exist_ok=True)
+
+    staged: dict[str, str] = {}
+    if assets:
+        import shutil
+        adir = scratch / "assets"
+        adir.mkdir()
+        for i, (key, src) in enumerate(sorted(assets.items())):
+            dst = adir / f"{i}{Path(src).suffix}"
+            shutil.copyfile(src, dst)
+            staged[key] = str(dst)
+
     job = {
         "repo_root": repo_root,
+        "assets": staged,
+        "export_tables": bool(export_tables),
+        "model_grants": model_grants or {},
         "graph": graph,
         "custom_nodes": custom_nodes or {},
         "input_path": input_path,
@@ -129,38 +295,42 @@ def run_pipeline_subprocess(
         "output_dir": output_dir,
         "node_preview_dir": node_preview_dir,
         "result_path": str(result_path),
+        # Sandbox guard (core/sandbox/guard.py): reads beyond Python's own
+        # install are limited to the repo's src/ (lazy op imports); writes to
+        # this run's dirs. .env, sessions.db, other users' files: unreadable.
+        "read_roots": [str(config.ROOT_DIR / "src")],
+        "write_roots": [str(scratch), output_dir, node_preview_dir]
+                       + ([str(config.MODEL_IPC_DIR)] if unix_sockets else []),
+        "unix_sockets": unix_sockets,
     }
     script = scratch / "run.py"
-    script.write_text(f"JOB = {json.dumps(job)}\n{_CHILD}", encoding="utf-8")
+    # JSON is not Python (true/false/null), so embed it as a string literal
+    # and parse it in the child.
+    script.write_text(f"import json as _json\nJOB = _json.loads({json.dumps(job)!r})\n{_CHILD}",
+                      encoding="utf-8")
 
-    blas = str(max(1, config.SANDBOX_BLAS_THREADS))
     child_env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(scratch),
         "TMPDIR": str(scratch),
-        "OMP_NUM_THREADS": blas,
-        "OPENBLAS_NUM_THREADS": blas,
-        "MKL_NUM_THREADS": blas,
-        "VECLIB_MAXIMUM_THREADS": blas,
-        "NUMEXPR_NUM_THREADS": blas,
+        **limits.thread_env(),
+        "PHOTON_NO_DOTENV": "1",
+        "MODEL_SIDECAR_ENABLED": "1" if config.MODEL_SIDECAR_ENABLED else "0",
     }
+    preexec_fn = limits.make_preexec(timeout)
 
-    preexec_fn = None
-    if platform.system() != "Windows":
-        import resource
+    try:
+        return _run_child(script, scratch, result_path, child_env, preexec_fn, timeout)
+    finally:
+        # Scratch holds run.py, result.json and staged assets (copies of saved
+        # models / labels): never needed after the run (D-048).
+        if os.getenv("PHOTON_KEEP_SCRATCH") != "1":
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
 
-        def _set_limits():
-            n = max(1, config.SANDBOX_BLAS_THREADS)
-            resource.setrlimit(resource.RLIMIT_CPU, (timeout * 2 * n, timeout * 3 * n))
-            try:
-                lim = config.SANDBOX_MEMORY_LIMIT_GB * 1024 ** 3
-                resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
-            except (ValueError, resource.error):
-                pass
-            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
-        preexec_fn = _set_limits
-
+def _run_child(script: Path, scratch: Path, result_path: Path, child_env: dict,
+               preexec_fn, timeout: int) -> dict[str, Any]:
     t0 = time.time()
     try:
         proc = subprocess.run(
@@ -180,7 +350,7 @@ def run_pipeline_subprocess(
 
     elapsed = time.time() - t0
     if not result_path.is_file():
-        return {"error": f"Pipeline process produced no result. stderr: {stderr[:500]}",
+        return {"error": f"Pipeline process produced no result. stderr: {stderr[-1500:]}",
                 "failed_node": None, "events": [], "previews": {}, "finals": [],
                 "timed_out": False, "time_taken_seconds": elapsed}
 

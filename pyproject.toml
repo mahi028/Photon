@@ -17,11 +17,22 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
     "scikit-image>=0.26.0",
+    "scikit-learn>=1.9.1",
     "scipy>=1.18.0",
+    "skops>=0.16.0",
     "tifffile>=2026.6.1",
     "torch==2.5.1",
     "torchvision==0.20.1",
     "waitress>=3.0.2",
+]
+
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.3,<3",
+]
+models = [
+    "segmentation-models-pytorch>=0.4",
+    "timm>=0.9",
 ]
 
 # PyTorch must come from the CUDA 12.1 build index — the default PyPI wheels
@@ -42,3 +53,14 @@ extraPaths = ["."]
 executionEnvironments = [
   { root = "." }
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore:datetime.datetime.utcnow:DeprecationWarning"]
+markers = ["slow: spawns sandbox subprocesses or an MCP server (deselect with -m 'not slow')"]

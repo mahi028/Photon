@@ -66,6 +66,24 @@
           <span class="text-xs text-gray-300 hidden md:block max-w-[100px] truncate" x-text="currentUser?.display_name || ''"></span>
         </button>
         <div x-show="open" x-transition class="absolute right-0 mt-2 w-44 bg-gray-900 border border-gray-800 rounded-xl shadow-2xl overflow-hidden z-50" style="display:none;">
+          <a href="/batches" class="block w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+            Batches
+          </a>
+          <a href="/models" class="block w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+            Models
+          </a>
+          <div x-show="usage" class="px-4 py-2 border-b border-gray-800 text-[11px] text-gray-500" style="display:none;"
+               :title="usage && `images ${fmtGB(usage.images)} · outputs ${fmtGB(usage.session_outputs)} · batches ${fmtGB(usage.batch_outputs)} · models ${fmtGB(usage.models)}`">
+            <div class="flex justify-between"><span>Storage</span>
+              <span x-text="usage && (usage.quota ? `${fmtGB(usage.total)} / ${fmtGB(usage.quota)}` : fmtGB(usage.total))"></span></div>
+            <div x-show="usage && usage.quota" class="h-1 bg-gray-800 rounded mt-1 overflow-hidden">
+              <div class="h-full" :class="usage && usage.total > 0.9 * usage.quota ? 'bg-red-500' : 'bg-indigo-500'"
+                   :style="usage && usage.quota ? `width: ${Math.min(100, 100 * usage.total / usage.quota)}%` : ''"></div>
+            </div>
+          </div>
+          <a href="/settings/api-keys" class="block w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+            API keys
+          </a>
           <button @click="logout()" class="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
             Log out
           </button>
@@ -126,6 +144,9 @@
 
   <!-- Share Link Dialog -->
   {% include "partials/share_dialog.html" %}
+
+  <!-- Label painter (D-044) -->
+  {% include "partials/label_painter.html" %}
 
   <!-- Carousel Modal -->
   <div x-show="carouselOpen" @click.self="closeCarousel()" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" x-transition style="display:none;">
@@ -202,12 +223,15 @@
 <script src="{{ url_for('static', filename='js/downloadDialog.js') }}"></script>
 <script src="{{ url_for('static', filename='js/codeDialog.js') }}"></script>
 <script src="{{ url_for('static', filename='js/shareDialog.js') }}"></script>
+<script src="{{ url_for('static', filename='js/labelPainter.js') }}"></script>
 
 <script>
 // Root Alpine component
 function app() {
   return {
     currentUser: null,
+    usage: null,
+    fmtGB(n) { return n >= 1 << 30 ? (n / (1 << 30)).toFixed(2) + ' GB' : (n / (1 << 20)).toFixed(0) + ' MB'; },
 
     // LLM provider info / OpenRouter model selection
     llmProvider: null,
@@ -220,6 +244,7 @@ function app() {
       try {
         const res = await fetch('/auth/me');
         if (res.ok) this.currentUser = await res.json();
+        fetch('/auth/me/usage').then(r => r.ok ? r.json() : null).then(u => { this.usage = u; }).catch(() => {});
       } catch (e) {
         console.warn('Failed to load current user:', e);
       }
@@ -260,11 +285,11 @@ function app() {
         if (res.ok) {
           this.llmModel = d.model;
         } else {
-          alert('Model switch failed: ' + (d.error || 'unknown'));
+          window.ui.toast('Model switch failed: ' + (d.error || 'unknown'), 'error');
           await this.loadLlmInfo();
         }
       } catch (e) {
-        alert('Model switch failed: ' + e.message);
+        window.ui.toast('Model switch failed: ' + e.message, 'error');
       } finally {
         this.llmModelSwitching = false;
       }
@@ -367,6 +392,15 @@ document.addEventListener('alpine:init', () => {
     close() {
       this.isOpen = false;
     }
+  });
+
+  Alpine.store('labelPainter', {
+    isOpen: false,
+    open(image) {
+      this.isOpen = true;
+      window.dispatchEvent(new CustomEvent('fe:labels-opened', { detail: image }));
+    },
+    close() { this.isOpen = false; }
   });
 
   Alpine.store('downloadDialog', {

@@ -1,7 +1,8 @@
 """Abstract base class for sandbox code executors.
 
 All callers depend on this interface only — never on a concrete implementation.
-Swap SubprocessExecutor → DockerExecutor by changing config.EXECUTOR_CLASS.
+Callers get one from backend.get_executor(): SubprocessExecutor (local) or
+RemoteExecutor (gVisor sandbox worker), chosen by PHOTON_SANDBOX.
 """
 
 from __future__ import annotations

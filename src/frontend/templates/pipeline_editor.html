@@ -12,7 +12,7 @@
      into x-data: |tojson emits surrounding double quotes, which terminate a
      double-quoted HTML attribute and silently break Alpine's expression. -->
 <div class="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden"
-     x-data="pipelineEditor(window.PIPELINE_ID)">
+     x-data="pipelineEditor(window.PIPELINE_ID, window.PUBLISHED_ID, window.PUBLISHED_VERSION)">
 
   <!-- Top bar -->
   <header class="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
@@ -22,8 +22,27 @@
       </a>
       <input type="text" x-model="title" :disabled="isPreset" @input="dirty = true"
              class="bg-transparent border border-transparent hover:border-gray-700 focus:border-indigo-500 rounded px-2 py-1 text-sm font-semibold text-gray-100 focus:outline-none min-w-0 flex-1 max-w-md disabled:opacity-70" />
-      <template x-if="isPreset">
+      <template x-if="isPreset && !published">
         <span class="badge-llm shrink-0">preset — read-only</span>
+      </template>
+      <template x-if="published">
+        <div class="flex items-center gap-2 shrink-0 min-w-0">
+          <span class="text-[11px] text-gray-400 truncate" x-text="`by ${published.owner}`"></span>
+          <select :value="publishedVersion" @change="switchVersion($event.target.value)"
+                  class="bg-gray-800 border border-gray-700 rounded text-[11px] text-gray-200 px-1.5 py-0.5 focus:outline-none focus:border-indigo-500"
+                  title="Published version">
+            <template x-for="v in published.versions" :key="v.version">
+              <option :value="v.version" :selected="v.version === publishedVersion"
+                      x-text="`v${v.version}` + (v.version === published.latest_version ? ' (latest)' : '')"></option>
+            </template>
+          </select>
+          <span x-show="published.unpublished_at" class="text-[11px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">unpublished</span>
+        </div>
+      </template>
+      <template x-if="publication && !published">
+        <a :href="`/published/${publication.published_id}`" class="text-[11px] shrink-0 px-1.5 py-0.5 rounded"
+           :class="publication.unpublished ? 'bg-gray-800 text-gray-400' : 'bg-emerald-900/60 text-emerald-300 hover:text-emerald-200'"
+           x-text="publication.unpublished ? `unpublished (v${publication.latest_version})` : `published v${publication.latest_version}`"></a>
       </template>
       <template x-if="dirty && !isPreset">
         <span class="text-[11px] text-amber-400 shrink-0">unsaved</span>
@@ -44,12 +63,27 @@
           <span class="animate-spin w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span> Running
         </span>
       </button>
+      <a :href="publishedId ? `/batches?published_id=${publishedId}&version=${publishedVersion || ''}` : `/batches?pipeline_id=${pipelineId}`"
+         @click="if (dirty && !publishedId) { $event.preventDefault(); _toast('Save the pipeline first: a batch runs the saved version.'); }"
+         class="btn-secondary text-sm px-3 py-1.5" title="Run this pipeline over many images">Batch…</a>
       <template x-if="!isPreset">
         <button @click="save()" :disabled="saving" class="btn-secondary text-sm px-3 py-1.5 disabled:opacity-50"
                 x-text="saving ? 'Saving…' : 'Save'"></button>
       </template>
-      <template x-if="isPreset">
+      <template x-if="!isPreset">
+        <button @click="publish()" :disabled="publishing" class="btn-secondary text-sm px-3 py-1.5 disabled:opacity-50"
+                :title="'Publish the saved pipeline to everyone on this instance as a new version'"
+                x-text="publishing ? 'Publishing…' : 'Publish'"></button>
+      </template>
+      <template x-if="publication && !publication.unpublished && !published">
+        <button @click="unpublish()" class="text-xs text-gray-500 hover:text-red-400 px-1">Unpublish</button>
+      </template>
+      <template x-if="isPreset && !published">
         <button @click="cloneToMine()" class="btn-secondary text-sm px-3 py-1.5">Clone to edit</button>
+      </template>
+      <template x-if="published">
+        <button @click="fork()" class="btn-secondary text-sm px-3 py-1.5"
+                title="Copy this version (and its custom nodes) into your library to edit">Fork</button>
       </template>
     </div>
   </header>
@@ -66,12 +100,15 @@
     <!-- Palette -->
     <aside class="w-56 lg:w-64 shrink-0 border-r border-gray-800 bg-gray-950 flex flex-col">
       <div class="p-3 shrink-0 space-y-2">
-        <input type="text" x-model="paletteFilter" placeholder="Filter ops…"
+        <input type="text" x-model="paletteFilter" placeholder="Search ops and library…"
                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
         <button @click="addInputNode()" :disabled="isPreset"
                 class="btn-secondary w-full text-xs py-1.5 disabled:opacity-50">+ Source image</button>
       </div>
       <div class="flex-1 overflow-y-auto custom-scrollbar px-2 pb-3 space-y-3">
+        <p x-show="paletteFilter.trim().length < 2" class="text-[10px] text-gray-600 px-1">
+          Type to also search ~600 library functions (skimage, scipy.ndimage, OpenCV).
+        </p>
         <template x-for="[cat, ops] in Object.entries(paletteGroups)" :key="cat">
           <div>
             <p class="text-[10px] uppercase tracking-wide text-gray-500 px-1 mb-1" x-text="cat"></p>
@@ -79,7 +116,7 @@
               <template x-for="op in ops" :key="op.name">
                 <button @click="addOpNode(op)" :disabled="isPreset"
                         class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-gray-900 border border-transparent hover:border-gray-800 transition-colors disabled:opacity-50 group">
-                  <p class="text-xs font-mono text-gray-200 truncate" x-text="op.name"></p>
+                  <p class="text-xs font-mono text-gray-200 truncate" :title="op.name" x-text="shortName(op.name)"></p>
                   <p class="text-[10px] text-gray-600 line-clamp-2 group-hover:text-gray-500" x-text="op.doc"></p>
                 </button>
               </template>
@@ -91,12 +128,23 @@
 
     <!-- Canvas -->
     <main class="flex-1 min-w-0 relative bg-gray-950">
-      <div x-ref="canvas" id="drawflow" class="absolute inset-0"></div>
+      <!-- Drawflow pans only when the clicked element's FIRST class is
+           parent-drawflow / drawflow, so its container must carry no classes of
+           its own: positioning lives on this wrapper. -->
+      <div class="absolute inset-0"
+           @keydown.shift.l.window="if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) prettify()">
+        <div x-ref="canvas" id="drawflow" style="width: 100%; height: 100%;"></div>
+      </div>
 
       <!-- canvas controls -->
       <div class="absolute bottom-3 left-3 flex gap-1.5 z-10">
         <button @click="zoomOut()" class="w-8 h-8 rounded-lg bg-gray-900/90 border border-gray-700 text-gray-300 hover:text-white text-sm">−</button>
         <button @click="zoomIn()" class="w-8 h-8 rounded-lg bg-gray-900/90 border border-gray-700 text-gray-300 hover:text-white text-sm">+</button>
+        <button @click="fitView()" title="Fit the whole pipeline in view" class="px-3 h-8 rounded-lg bg-gray-900/90 border border-gray-700 text-gray-300 hover:text-white text-xs">Fit</button>
+        <button @click="prettify()" title="Arrange nodes left to right in dependency order (Shift+L)" class="px-3 h-8 rounded-lg bg-indigo-900/70 border border-indigo-600 text-indigo-100 hover:text-white text-xs flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h4v4H4zM16 4h4v4h-4zM16 16h4v4h-4zM8 8h3a2 2 0 012 2v6a2 2 0 002 2h1M11 8h2a2 2 0 002-2"/></svg>
+          Prettify
+        </button>
         <button @click="validate()" class="px-3 h-8 rounded-lg bg-gray-900/90 border border-gray-700 text-gray-300 hover:text-white text-xs">Validate</button>
         <template x-if="selectedNodeId && !isPreset">
           <button @click="removeSelected()" class="px-3 h-8 rounded-lg bg-red-900/60 border border-red-700 text-red-200 hover:text-white text-xs">Delete node</button>
@@ -127,8 +175,17 @@
         <template x-if="selectedSpec">
           <div class="space-y-3">
             <div>
-              <p class="text-xs font-mono text-gray-200" x-text="selectedSpec.name"></p>
+              <p class="text-xs font-mono text-gray-200 break-all" x-text="selectedSpec.name"></p>
               <p class="text-[10px] text-gray-500 mt-0.5" x-text="selectedSpec.doc"></p>
+              <template x-if="selectedSpec.library && !selectedSpec.subpipeline">
+                <p class="text-[10px] text-gray-600 mt-1">Library function: empty params use the library's defaults. Inputs marked ? are optional.</p>
+              </template>
+              <template x-if="selectedSpec.subpipeline">
+                <div class="text-[10px] text-gray-600 mt-1 space-y-1">
+                  <p>Published pipeline, pinned to v<span x-text="selectedSpec.version"></span> by <span x-text="selectedSpec.owner"></span>. Params named <code class="font-mono">node.param</code> override the published values; empty keeps them.</p>
+                  <a class="text-indigo-400 hover:text-indigo-300" :href="`/published/${selectedSpec.published_id}?version=${selectedSpec.version}`" target="_blank">Open it</a>
+                </div>
+              </template>
             </div>
             <template x-if="!(selectedSpec.params || []).length">
               <p class="text-[11px] text-gray-600">No parameters.</p>
@@ -136,18 +193,30 @@
             <template x-for="p in (selectedSpec.params || [])" :key="p.name">
               <div>
                 <label class="text-[11px] text-gray-400 flex items-center justify-between">
-                  <span x-text="p.name"></span>
+                  <span><span x-text="p.name"></span><span x-show="p.required" class="text-amber-400"> *</span></span>
                   <span class="text-gray-600" x-text="p.kind"></span>
                 </label>
-                <template x-if="p.kind === 'bool'">
+                <template x-if="p.kind === 'bool' && selectedSpec.library">
+                  <select :value="isParamSet(p.name) ? String(paramValue(p.name)) : ''" :disabled="isPreset"
+                          @change="$event.target.value === '' ? setParam(p.name, '', 'json') : setParam(p.name, $event.target.value === 'true', 'bool')"
+                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                    <option value="" x-text="`default (${p.default})`"></option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </template>
+                <template x-if="p.kind === 'bool' && !selectedSpec.library">
                   <input type="checkbox" :checked="paramValue(p.name)" :disabled="isPreset"
                          @change="setParam(p.name, $event.target.checked, 'bool')"
                          class="mt-1 w-4 h-4 accent-indigo-500" />
                 </template>
                 <template x-if="p.kind === 'choice'">
-                  <select :value="paramValue(p.name)" :disabled="isPreset"
+                  <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
                           @change="setParam(p.name, $event.target.value, 'choice')"
                           class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                    <template x-if="selectedSpec.library">
+                      <option value="" x-text="`default (${p.default})`"></option>
+                    </template>
                     <template x-for="c in (p.choices || [])" :key="c">
                       <option :value="c" x-text="c"></option>
                     </template>
@@ -155,12 +224,74 @@
                 </template>
                 <template x-if="p.kind === 'int' || p.kind === 'float'">
                   <input type="number" :value="paramValue(p.name)" :disabled="isPreset"
+                         :placeholder="paramPlaceholder(p)"
                          :min="p.min" :max="p.max" :step="p.kind === 'int' ? 1 : 'any'"
                          @input="setParam(p.name, $event.target.value, p.kind)"
                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60" />
                 </template>
+                <template x-if="assetParam(p) === 'model'">
+                  <div>
+                    <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
+                            @change="setParam(p.name, $event.target.value, 'str')"
+                            class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                      <option value="">(pick a saved model)</option>
+                      <template x-if="paramValue(p.name) && !savedModels.find(m => m.model_id === paramValue(p.name))">
+                        <option :value="paramValue(p.name)" x-text="`${String(paramValue(p.name)).slice(0, 8)}… (not in your list)`"></option>
+                      </template>
+                      <template x-for="m in savedModels" :key="m.model_id">
+                        <option :value="m.model_id" x-text="`${m.name} · ${m.estimator} · ${m.created_at.slice(0, 16).replace('T', ' ')}`"></option>
+                      </template>
+                    </select>
+                    <p x-show="!savedModels.length" class="text-[10px] text-gray-600 mt-0.5">No saved models yet: end a training graph with ml_save_model and run it.</p>
+                  </div>
+                </template>
+                <template x-if="assetParam(p) === 'segmodel'">
+                  <div>
+                    <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
+                            @change="setParam(p.name, $event.target.value, 'str')"
+                            class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                      <option value="">(pick an uploaded model)</option>
+                      <template x-if="paramValue(p.name) && !segModels.find(m => m.model_id === paramValue(p.name))">
+                        <option :value="paramValue(p.name)" x-text="`${String(paramValue(p.name)).slice(0, 8)}… (not in your list)`"></option>
+                      </template>
+                      <template x-for="m in segModels" :key="m.model_id">
+                        <option :value="m.model_id" x-text="`${m.name}${m.spec.modality ? ' · ' + m.spec.modality : ''} · ${m.spec.arch}/${m.spec.encoder}`"></option>
+                      </template>
+                    </select>
+                    <p class="text-[10px] text-gray-600 mt-0.5">Upload models on the <a href="/models" target="_blank" class="text-indigo-400">Models page</a>.</p>
+                  </div>
+                </template>
+                <template x-if="assetParam(p) === 'labels'">
+                  <select :value="paramValue(p.name) ?? ''" :disabled="isPreset"
+                          @change="setParam(p.name, $event.target.value, 'str')"
+                          class="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-indigo-500 disabled:opacity-60">
+                    <option value="">latest labels painted on the input image</option>
+                    <template x-for="a in savedLabels" :key="a.annotation_id">
+                      <option :value="a.annotation_id" x-text="`${a.name} · ${a.width}×${a.height} · image ${a.image_id.slice(0, 8)}`"></option>
+                    </template>
+                  </select>
+                </template>
+                <template x-if="(p.kind === 'str' || p.kind === 'json') && !assetParam(p)">
+                  <input type="text" :value="paramText(p)" :disabled="isPreset"
+                         :placeholder="paramPlaceholder(p)"
+                         @change="setParam(p.name, $event.target.value, p.kind)"
+                         :class="jsonInvalid(p) ? 'border-red-500' : 'border-gray-700'"
+                         class="mt-1 w-full bg-gray-800 border rounded px-2 py-1 text-xs font-mono text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500 disabled:opacity-60" />
+                </template>
+                <p x-show="p.kind === 'json'" class="text-[10px] text-gray-600 mt-0.5"
+                   x-text="jsonInvalid(p) ? 'Not valid JSON (use 3, [5, 5], &quot;text&quot;, null)' : 'JSON: 3, [5, 5], &quot;THRESH_OTSU&quot;, null'"></p>
                 <p x-show="p.doc" class="text-[10px] text-gray-600 mt-0.5" x-text="p.doc"></p>
               </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- non-image outputs of the selected node (numbers, thresholds, tables) -->
+        <template x-if="selectedValues">
+          <div class="pt-3 border-t border-gray-800 space-y-1">
+            <p class="text-[10px] uppercase tracking-wide text-gray-500">Last run values</p>
+            <template x-for="[port, v] in Object.entries(selectedValues)" :key="port">
+              <p class="text-[11px] font-mono text-gray-300 break-all"><span class="text-gray-500" x-text="port + ' = '"></span><span x-text="formatValue(v)"></span></p>
             </template>
           </div>
         </template>
@@ -187,6 +318,11 @@
 {% endblock %}
 
 {% block scripts %}
-<script>window.PIPELINE_ID = {{ pipeline_id|tojson }};</script>
+<script>
+  window.PIPELINE_ID = {{ pipeline_id|tojson }};
+  window.PUBLISHED_ID = {{ (published_id or none)|tojson }};
+  window.PUBLISHED_VERSION = {{ (published_version or none)|tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/graphLayout.js') }}"></script>
 <script src="{{ url_for('static', filename='js/pipelineEditor.js') }}"></script>
 {% endblock %}

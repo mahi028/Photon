@@ -1,0 +1,18 @@
+# Keep the build context small and secret-free.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+volumes/
+node_modules/
+.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.ipynb_checkpoints/
+**/.pytest_cache/
+tests/
+project_documentation/
+*.ipynb
+docker/photon.env
+src/frontend/static/css/output.css

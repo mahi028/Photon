@@ -48,6 +48,12 @@ def register_model(name: str, vram_mb: int, doc: str = "",
 
 
 def get_model_spec(name: str) -> Optional[ModelSpec]:
+    """A declared model, or an uploaded one ("user:<model_id>", D-047): the
+    latter is resolved from the database each time, so a deleted model stops
+    loading."""
+    if name.startswith("user:"):
+        from .user_models import model_spec
+        return model_spec(name[len("user:"):])
     _ensure_loaded()
     return _MODELS.get(name)
 

@@ -6,6 +6,8 @@ import inspect
 from pathlib import Path
 from flask import Blueprint, jsonify
 
+from ..core.auth.middleware import login_required
+
 example_bp = Blueprint("examples", __name__)
 
 _EXPLANATION = """## Function Contract
@@ -29,6 +31,7 @@ Standard library: os, pathlib, math, json, re, io.
 
 
 @example_bp.route("/examples/code", methods=["GET"])
+@login_required
 def get_example_code():
     """Return the canonical example code and contract explanation."""
     example_path = Path(__file__).parent.parent / "examples" / "example_code.py"

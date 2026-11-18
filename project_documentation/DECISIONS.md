@@ -207,3 +207,338 @@ Also replaced two skimage calls deprecated in 0.26 (`binary_*` morphology, `remo
 **Fix:** inject the id as a JS global inside a `<script>` tag (`window.PIPELINE_ID`) and use `x-data="pipelineEditor(window.PIPELINE_ID)"` — the same pattern `index.html` already used successfully for `ACTIVE_SESSION_ID`, which is why sessions never hit this. Swept the templates: no other `tojson` sits inside an HTML attribute.
 **Why P3's tests missed it (the honest lesson):** every P3 test called `pipelineEditor('id')` directly from JavaScript, bypassing the HTML attribute entirely. The graph round-trip, type-checking and export logic were all correct — the *wiring between template and component* was the untested part, and it was the only part that was broken. Verifying "the logic works" is not the same as verifying "the page works".
 **New regression guard:** `jsdom`-based checks that parse the **actually served** page — assert the `x-data` expression is valid JS, assert no junk attributes appear from quote breakage, and compile all 30 Alpine expression attributes on the page. Plus a full end-to-end run that loads the served HTML with real Drawflow and the real editor module and asserts the UI populates (40 palette ops, 6 canvas nodes, sessions listed, 5-node/5-edge round-trip export).
+
+### D-032: MCP server exposes the pipeline layer, not the chat loop
+**Decision:** `src/mcp_server/` is a stdio MCP server over `core/` (+ `run_pipeline_for_session`). Tools: image upload, sessions, op catalog, validate/run/save pipelines, outputs with JPEG previews.
+**Why not wrap chat:** an MCP client is already an LLM. Wrapping `/message` would stack Photon's LLM loop under the client's — double cost/latency and the validation feedback gets buried. The client plans; Photon validates and executes.
+**Excluded (v1):** `run_code` and saving new custom nodes. Both run arbitrary Python; the AST check + rlimited subprocess is not a boundary to expose to possibly prompt-injected callers. Revisit once `DockerExecutor` exists.
+**Identity:** `PHOTON_MCP_USER` (username/email) — stdio is local single-user. Remote (streamable HTTP) needs per-user tokens first.
+**Dependency:** `mcp` is an optional extra (`uv sync --extra mcp`) so `dep_sync` (which reads only `[project].dependencies`) does not whitelist it for sandboxed code.
+**Side fix:** `SessionManager.get_session` now checks the cached session's `updated_at` against SQLite and reloads if another process wrote it. Before, a second writer (MCP, or any other gunicorn worker) could leave a worker serving stale outputs, and the worker's next `save_session` could overwrite `image_ids` with its stale copy. Status-only changes don't bump `updated_at`, so they can still be stale cross-process.
+
+### D-033: MCP over HTTP authenticates with per-user API keys minted in the UI
+**Decision:** `api_keys` table (`key_id`, `user_id`, `name`, `key_hash`, `prefix`, `created_at`, `last_used_at`, `expires_at`, `revoked_at`). Users create, list and revoke keys at `/settings/api-keys` (routes: `GET/POST /api/keys`, `DELETE /api/keys/<id>`, session-cookie auth, owner-scoped, 404 on someone else's key). The MCP HTTP transport requires `Authorization: Bearer pk_...` via the SDK's `TokenVerifier` hook; each call acts as the key's owner (`AccessToken.subject = user_id`, `client_id = key_id`).
+**Key handling:** `pk_` + 32 random bytes; only the SHA-256 hex digest is stored, and the plaintext is returned once at creation. A plain hash (not bcrypt) is enough because keys are high-entropy random, and verification runs on every request. `last_used_at` is written at most once per minute per key. `POST /api/keys` requires a real JSON body (no `force=True`), so a cross-site form post can't mint a key.
+**stdio unchanged:** local and single-user, still `PHOTON_MCP_USER`. The HTTP transport ignores it. Tools are now collected in a list and registered by `build_server()`, because auth is fixed when `MCPServer` is constructed.
+**Not done:** OAuth sign-in for MCP clients (no copy-paste), key scopes (read-only vs run), and an admin CLI to mint keys.
+
+## D-034 — Remote-safe image I/O for MCP (and URL fetch hardening)
+
+**Context.** Over streamable HTTP the MCP caller is remote and may be prompt-injected. `upload_image(path=)` read any file the server's OS user could read (including other users' uploads under `volumes/`), and `url=` fetches (MCP and `POST /api/upload`) could reach loopback, the LAN, or cloud metadata (SSRF).
+
+**Decision.**
+- `upload_image` gains `data_base64` + `filename` as the portable way in. `path` stays unrestricted over stdio. Over HTTP it is refused unless `PHOTON_MCP_PATH_ROOTS` allow-lists directories, and `volumes/` is never readable.
+- `core/image/fetch.py::fetch_url` is shared by both entry points. It allows http(s) only, every hop (redirects followed manually, max 3) must resolve to global addresses, and the streamed body is capped at `MAX_UPLOAD_BYTES`. `PHOTON_ALLOW_PRIVATE_URLS=1` opts out.
+- `download_output` returns full-res outputs as an MCP embedded resource, capped by `PHOTON_MCP_MAX_DOWNLOAD_MB` (default 25).
+- New `detach_image`, plus `delete_session`, which requires `confirm_title`. Tools carry `readOnlyHint` or `destructiveHint` annotations.
+
+**Known gaps.** There is a DNS-rebinding window between our resolve and requests' connect. `POST /api/upload` and `GET /api/images/<id>` were unauthenticated and are now `@login_required`. Images still have no owner, so any logged-in user who knows an image_id (a uuid4) can read its metadata.
+
+## D-035 — Published pipelines (instance-wide, versioned snapshots)
+
+**Context.** Custom nodes are resolved from the *running* user's library, so a pipeline that uses one only works for its author. Sharing meant copying code by hand.
+
+**Decision.**
+- Publishing turns one of your library pipelines into an immutable version, stored in `published_pipelines` and `published_pipeline_versions`. Each version freezes the graph and a full copy of every custom node it uses (code, ports, params, doc), keyed by the original `custom_node_id`.
+- Runs of a published version resolve custom nodes from that snapshot (`run_pipeline_for_session(custom_nodes=...)`), never from anyone's live library. The author's later edits or deletes never break existing versions.
+- Re-publishing appends version N+1 to the same publication (one per source pipeline). An identical snapshot is a no-op. The AST check is re-run at publish time.
+- Visibility is the whole instance; all users are trusted colleagues. Custom node code runs in the same rlimited subprocess as the author's own runs. The real boundary, the Docker executor, is Phase 2. Users can read a version's custom node code: they should see what they run.
+- Unpublishing hides a publication from others. The owner still sees it, versions are never deleted, and publishing again restores it. Deleting the source pipeline keeps the publication (`source_pipeline_id` is SET NULL).
+- Fork copies a version into the forker's library. Custom nodes are imported: an identical same-name node is reused, a clash is renamed `name (from owner)`. The graph is rewritten to the new ids, and a credit line goes in the description.
+- Output provenance (`GeneratedImage.code`) records `{published_id, version, title, owner, graph}`.
+- Core logic is in `core/pipeline/publishing.py`, with no HTTP. The UI is a Public section on the Pipelines page plus Publish/Unpublish in the editor, and `/published/<id>?version=N` is a read-only editor view with a version picker, Run and Fork. MCP gets `list_pipelines(scope, query)`, `get_pipeline(published_id, version)`, `run_pipeline(published_id, version)`, and `publish_pipeline`, `unpublish_pipeline`, `fork_pipeline`.
+
+**Not yet.** Example input/output thumbnails on cards. Photon's own chat LLM doesn't see public pipelines. Composite nodes (pipeline as a node). Per-pipeline MCP tools. Docker isolation.
+
+## D-036 — Sandbox hardening before the container/VM executor
+
+**Context.** Shared pipelines (D-035) mean colleagues run each other's custom node code. The save-time AST check was trivially bypassable: `pathlib.Path(".env").read_text()`, `getattr(os, "sys"+"tem")`, and `np.load(..., allow_pickle=True)` all passed it. Also, the pipeline child imported `config.py`, whose `load_dotenv()` put every app secret into the child's environment.
+
+**Decision (defence in depth; not the final boundary).**
+- **Runtime guard** `core/sandbox/guard.py`, a PEP 578 audit hook installed in both children (the pipeline child after trusted imports, and inlined at the top of the run-code harness), before any user code:
+  - It denies process creation (subprocess, os.system/exec/spawn/posix_spawn/fork), signals, ctypes, unpickling (`pickle.find_class`), and network sockets.
+  - AF_UNIX connects are allowed only to the model sidecar socket.
+  - File opens may write only under the run's own dirs, and may read only Python's install, the repo's `src/`, the input and those dirs. Paths are realpath'd, so symlinks resolve to their targets. Filesystem mutations need every path inside write roots.
+  - `os.environ` is wiped to an allow-list.
+- **`PHOTON_NO_DOTENV=1`** in children skips `load_dotenv`.
+- **The model sidecar** is started by the parent; the child may connect to it but never spawn it.
+- **AST check** now also rejects:
+  - `getattr`/`setattr`/`delattr`/`globals`/`locals`/`vars`/`__builtins__`;
+  - dunder access outside a small allow-list, and frame/code attributes;
+  - `allow_pickle`, and `torch.load` without `weights_only=True`;
+  - fork/spawn/kill-style calls and relative imports;
+  - more explicit module blocks (pickle, marshal, gc, inspect, sys, shutil…).
+  - `strict_io=True` (custom node save, chat-inline nodes, publish) also rejects all file-I/O calls, since nodes get arrays, not files.
+
+**Verified.** 18 attack variants run directly in the pipeline child (bypassing the AST layer) are all denied, and decoy `.env`/db/upload files stay untouched. The stored custom nodes and LLM snippets show no new false positives. Publishing e2e: 42/42.
+
+**Known limits.**
+- C extensions do I/O without audit events (e.g. `cv2.imread`, which strict mode blocks by name; other C paths may exist).
+- Audit hooks are not a security boundary per PEP 578.
+- The sidecar socket accepts any command from the child.
+- `MODEL_IPC_DIR` is shared across runs.
+- Fix: the container/VM executor (Phase 2).
+
+## D-037 — Who gets in, and who sees what
+
+**Context.** D-035's trust model ("every account is a trusted colleague") rested on three things that weren't true:
+- Sign-up was open to anyone who could reach the server, with no email verification.
+- `/previews/<path>` served any file under `volumes/` without login. That included `sessions.db`, with every password hash and API-key hash. `/outputs/<path>` had the same problem, and `/api/llm/model` let anonymous users change the global model.
+- Any user who knew an `image_id` could attach another user's image to their own session.
+
+**Decision.**
+- **Sign-up policy** (`core/auth/signup_policy.py`), set by env vars:
+  - `PHOTON_SIGNUP=open|invite|closed`.
+  - Optional `PHOTON_SIGNUP_ALLOWED_DOMAINS` / `PHOTON_SIGNUP_ALLOWED_EMAILS`. Google sign-up must also have `email_verified`. Password sign-up can't prove the email, which is why `invite` exists: it requires `PHOTON_SIGNUP_INVITE_CODE`.
+  - Existing accounts can always log in.
+  - Startup logs a warning for open mode with no allow-list.
+  - `python -m src.backend.cli user add|list|passwd` creates accounts for `closed` mode.
+- **File routes.** Both now require login. `/previews/uploads/<file>` serves only a registered image's file or preview, to someone who may access that image. `/outputs/<session_id>/<file>` serves only under a session you own. Everything else returns 404. `llm_routes` and `example_routes` now require login.
+- **Image ownership.** New column `images.owner_id`, set on upload (web, MCP) and on clone. `store.user_can_access_image` means: you uploaded it, or it's listed in one of your sessions (this covers pre-migration rows and share clones). It's enforced on metadata, preview, session create and attach, in both web and MCP.
+- **Session run status across processes.**
+  - `store.claim_session_run` is an atomic `UPDATE ... WHERE status != 'running'`, and `SessionManager.try_start_run` replaces check-then-set. Two processes (Flask, MCP) can no longer both start a run on one session.
+  - `save_session` no longer writes `status`, so a stale cached copy can't clobber another process's run.
+  - The cache compares `(updated_at, status)`.
+  - A `running` claim older than an hour (`status_at`) is treated as abandoned.
+  - The LLM loop and manual run release the session in `finally`. The nested pipeline run inside the LLM loop no longer flips the session to idle mid-loop (`manage_status=False`).
+- **Thread caps** (`core/sandbox/limits.py`), shared by all children. `OPENCV_FOR_THREADS_NUM` and the TF pool vars join the BLAS ones. Without them, cv2 failed with "Can't spawn new thread" on the 256-core box under RLIMIT_AS.
+
+**Verified.** `tests/`: an anonymous request for `sessions.db` gets 404. A second user gets 404 on another user's image metadata, preview, original, outputs, attach and session create. Cross-process claims work with real child processes. Fresh-DB migrations are ordered (a test caught an `ALTER TABLE images` that ran before the table existed).
+
+## D-038 — Remote sandbox worker (gVisor, optional GPU), ready to deploy
+
+**Context.** The D-036 guard is a speed bump. Custom nodes may need torch/tensorflow on a GPU, which rules out WASM. The dev box is itself a container (no KVM, no Docker), so Firecracker and runsc can't run here.
+
+**Decision.**
+- One switch, `core/sandbox/backend.py`: `PHOTON_SANDBOX=local|remote`. `get_executor()` handles run-code and `run_pipeline()` handles graphs. Routes, the LLM loop and MCP call only these.
+- **Remote** (`core/sandbox/remote.py`) sends the job and input file over HTTP with a bearer token to the worker (`src/sandbox_worker/server.py`). The worker runs the same local executors (AST, rlimits, guard) in a scratch dir. It returns a zip with `result.json` and outputs, with paths relative. The client validates every entry (no absolute paths, no `..`, no links, count and size caps) before extracting into the caller's dirs.
+- **Worker image** `docker/sandbox-worker/`:
+  - Slim Python with the cu121 wheels; it holds only code, with no `.env`, `volumes/` or frontend.
+  - Compose sets `runtime: runsc`, read-only root, tmpfs scratch, all caps dropped, `no-new-privileges`, pids/mem/cpu limits and an optional GPU via nvproxy.
+  - `SANDBOX_MEMORY_LIMIT_GB=0` disables RLIMIT_AS, which CUDA can't live under; the container limit caps memory instead.
+  - Egress is blocked with a `DOCKER-USER` firewall rule (see the README).
+- Removed the `DockerExecutor` stub and `config.EXECUTOR_CLASS`.
+
+**Verified.** Without gVisor, against a localhost worker: protocol, auth, zip-traversal rejection, the app's run route end to end, and the full guard attack suite through the worker (`PHOTON_SANDBOX=remote pytest tests/test_sandbox.py`: 34 passed).
+
+**Not verified.** Running under `runsc`, GPU via nvproxy, model ops on the worker's own sidecar. Checklist: `docker/sandbox-worker/README.md`.
+
+## D-039 — Shared pipelines in the chat loop; async MCP runs
+
+- The chat system prompt lists up to 30 published pipelines (id, title, version, owner, op chain, short description). Each entry is fenced as user-written data. The LLM can answer with `{"response_type": "pipeline", "pipeline": {"published_id": ..., "version"?: N}}`. The loop resolves the frozen snapshot (`publishing.resolve_for_run`) and runs it with provenance. An unknown id becomes a feedback turn.
+- MCP `run_pipeline(wait=False)` returns a `job_id` immediately; `get_run(job_id)` returns progress, then the usual summary and previews. Jobs live in the MCP process's memory for an hour after they finish, and only the owner can see them. Outputs are saved to the session either way.
+
+## D-040 — Card thumbnails for published pipelines; chat cards for shared runs
+
+**Thumbnails (#8).**
+- The image is the author's own latest output of the published graph. That is real data, and no extra run is needed. Other users' runs are never used, since their data isn't the author's to share.
+- "Same graph" means node ids, ops, params and edges match; editor `pos` and key order are ignored. Pipeline outputs already store the graph as provenance (`outputs.code`), so this needs no schema change.
+- On publish, the image is copied into `volumes/published_thumbs/<published_id>.jpg`, downscaled to 480 px on the long edge. It is copied rather than referenced so it survives the session being deleted and never points into session files.
+- It is served by `GET /api/published/<id>/thumbnail`, under the same visibility rule as the publication.
+- The publish dialog has a checkbox, on by default, that says the image is visible to everyone; MCP `publish_pipeline(thumbnail=)` does the same. Unchecking it removes the image.
+- Re-publishing an unchanged pipeline refreshes the image. A new version with no matching output drops the old image, because that image no longer shows what the pipeline does.
+- Cards without an image show the op chain.
+
+**Chat cards for shared runs.** Once the chat loop has resolved a `published_id`, the stored message is the resolved graph plus `published: {published_id, version, title, owner}`, and the UI gets a `pipeline_resolved` event. The card's "Save" becomes a Fork, which imports the snapshot's custom nodes into the user's library. "Open" goes to the read-only `/published/<id>?version=N`. A plain save would reference custom nodes the user doesn't own.
+
+## D-041 — Library functions as pipeline nodes (phase 1)
+
+**Context.** The curated catalogue (about 40 hand-written ops) kept the platform narrow: something like multi-Otsu meant writing a custom node. The libraries already document their functions well (304 of 309 public skimage functions in the exposed modules have numpydoc Parameters and Returns sections).
+
+**Decision.**
+- **Naming.** A node can name a function directly: `{"op": "lib:<module>.<function>"}` (`core/pipeline/library.py`). The graph schema, runner, sandbox child and remote worker are unchanged; `registry.get_op` resolves the `lib:` prefix.
+- **Modules exposed:** `skimage.{color, exposure, feature, filters, filters.rank, measure, morphology, restoration, segmentation, transform, util, registration, metrics, draw}`, `scipy.ndimage` and `cv2`, about 600 functions.
+- **How specs are generated:**
+  - **Python functions** use `inspect.signature` and numpydoc (`scipy._lib._docscrape`). Array-typed arguments become input ports, optional when they have a default. An "int or ndarray" argument becomes both an optional port and a param; a connected port wins. Everything else is a param whose kind (int, float, bool, str, choice or json) comes from the docstring type. Each documented return value becomes an output port. `out`/`output` buffers are hidden.
+  - **OpenCV builtins** are parsed from their `f(a, b[, c]) -> x, y` docstring line. Image-like names become ports. An optional argument that is also returned is an output buffer and is hidden. Constants can be given by name (`"THRESH_BINARY|THRESH_OTSU"`); flat lists become tuples and nested lists become float32 arrays.
+- **Only set params are passed** (`OpSpec.pass_defaults=False`), so the function's own defaults apply. Optional ports left unconnected are not passed either.
+- **Types:**
+  - New `ARRAY` type: it connects to and from every array type, plus NUMBER into ARRAY.
+  - `ANY` is now also a wildcard source.
+  - The runtime coercion check runs only on 2-D and larger arrays.
+  - IMAGE_RGB into IMAGE_GRAY still needs an explicit `to_grayscale`.
+- **Non-image outputs** (thresholds, numbers, tuples, regionprops tables) are reported back as size-capped JSON `values` per node:
+  - in the run result and the `node_values` SSE event;
+  - in the editor inspector and the chat card;
+  - in the MCP summary and the LLM's run feedback.
+
+  Only image-like arrays become previews or saved outputs.
+- **Glue ops** (`ops/glue.py`): `get_item`, `digitize`, `math`, `compare`, `astype`, `take`, `stack`, `to_number`. This is a curated slice of numpy, not numpy itself, which has too many footguns (memory-mapping, pickle loading, object arrays).
+- **Discovery:**
+  - Editor: searches `/api/ops/library?q=` (debounced), and fetches the specs a graph uses via `?names=`. `/api/ops` stays core-only unless `?library=1`, because the full list is about 600 KB.
+  - MCP: `list_ops(query=...)` returns `library_ops`, and `describe_op(name)` returns one spec.
+  - Chat: the system prompt lists the function names by module (about 9 KB). Validation errors now list a node's real inputs, outputs and params, so a wrong guess is corrected in one round.
+- **Reproducibility.** Published versions record `{distribution: version}` for the libraries their graph uses, plus numpy (`published_pipeline_versions.env_json`, `environment` in the API). An unchanged graph doesn't get a new version just because a library was upgraded.
+- The catalogue (about 3 s to build) warms in a background thread at app start.
+
+**Security.**
+- A name is accepted only if its module is allow-listed and the attribute is a public function of it, so there's no dotted-path resolution of user input.
+- Excluded:
+  - functions with file-like arguments (`fname`, `path`, `url`...);
+  - functions whose name contains read, write, load, save, show, fetch, download, plot, view or pickle;
+  - functions with a required callable argument;
+  - an explicit deny list (`cv2.imwrite*`, `cv2.imencode*`, `cv2.selectROI*`, `cv2.addText`, `skimage.util.apply_parallel`, `skimage.measure.ransac`...);
+  - OpenCV functions without an image argument (global state such as `setNumThreads`).
+- Params are JSON, so no callables or objects can be passed in.
+- The allow-list guards against footguns; the boundary is still the sandbox child (rlimits and the D-036 guard, and the D-038 worker when it's enabled).
+
+**Not in phase 1.** scikit-learn make/fit/predict with a trained-model value (phase 2). Training jobs (phase 3). Pipeline-as-a-node (#9) and per-pipeline MCP tools (#10), which now get simpler because the types are generic.
+
+## D-042 — scikit-learn models as pipeline nodes (phase 2)
+
+**Decision.**
+- **Dependency.** `scikit-learn` is now a dependency, mapped to `sklearn` in `dep_sync`, so custom nodes can import it too.
+- **Model nodes.**
+  - 35 allow-listed estimator classes (`library.ESTIMATORS`) are constructor nodes: `lib:sklearn.cluster.KMeans`, `lib:sklearn.ensemble.RandomForestClassifier`, and others across clustering, mixtures, ensembles, linear models, neighbours, SVMs, trees, naive Bayes, decomposition and scaling.
+  - Params come from the class signature and numpydoc, like D-041.
+  - Hidden params: `n_jobs`, `verbose`, `memory`, `copy`, `copy_X`, `warm_start`. Joblib workers would be processes, which the sandbox forbids; thread pools are already capped by `limits.py`.
+  - Excluded: meta-estimators that take other estimators, model selection, and the dataset fetchers.
+- **New port type `MODEL`.** It connects only to MODEL (and from ANY).
+- **ML ops** (`ops/ml.py`): `ml_fit`, `ml_predict`, `ml_fit_predict`, `table_to_array` and `map_labels`.
+  - Fitting works on a clone, so the model node's own value stays unfitted.
+  - Two sample layouts:
+    - `pixels` (default): X is (H,W) or (H,W,C), y is a label image, and results come back as images.
+    - `rows`: X is an (N,C) table or a dict of columns, such as `regionprops_table` returns.
+  - `ignore_label` drops unlabeled training pixels; `max_samples` fits on a seeded random subset for speed.
+  - Clusterers without `predict` (DBSCAN, Agglomerative) use `fit_predict` on all samples, with a clear error if that exceeds `max_samples`.
+  - Errors name what went wrong: missing methods (listing the ones available), sample-count mismatches, unknown table columns.
+- **Value summaries.** A model's summary in run values says whether it's fitted and shows its params.
+- **Prompt.** The chat system prompt describes the model → fit/predict pattern with examples.
+
+**Models live for one run only.** Saving a fitted model and applying it to other images would mean unpickling a user-produced object. The sandbox forbids that on purpose (D-036), so it waits for a safe format such as skops or ONNX.
+
+**Verified in the sandbox child:**
+- k-means colour clusters;
+- a random-forest pixel classifier on `multiscale_basic_features`, trained from multi-Otsu labels (`predict_proba` returns an (H,W,3) image);
+- object clustering: `label` → `regionprops_table` → `table_to_array` → StandardScaler → KMeans → `map_labels`;
+- DBSCAN.
+
+**Performance note.** Importing scikit-learn takes about 1 s normally, but took over 100 s while the shared filesystem was slow. Pipeline timeouts (`EXECUTION_TIMEOUT_SECONDS` × 4) may need raising on such hosts.
+
+## D-043 — API key scopes
+
+**Decision.** Every API key has one scope. Scopes are levels, each including the one before:
+
+- `read`: list and view sessions, outputs, ops, pipelines and runs; validate graphs.
+- `run`: also upload images, create, attach and detach sessions, and run pipelines.
+- `write`: also save, publish, unpublish and fork pipelines, and delete sessions.
+
+**How.**
+- New `api_keys.scope` column. Keys made before it default to `write`, since they had full access.
+- `POST /api/keys` takes `scope` (default `write`, so existing API clients keep working). The keys page defaults to `run` with a 90-day expiry, so new keys are least-privilege by default.
+- The MCP verifier puts the scope on the access token. Each tool is registered with the scope it needs (`_tool(scope=...)`) and refuses with a message naming the scope it needs and the key's scope.
+- stdio has no key: it is the local user and keeps full access.
+
+**Why.** A leaked `run` key can process images in the owner's account but can't publish under their name, overwrite their pipelines or delete sessions. A `read` key suits dashboards and agents that only fetch results.
+
+## D-044 — Saved models and painted labels
+
+**Decision.** Fitted models can outlive a run, and users can paint training labels in the UI.
+
+- **Saving.** `ml_save_model(model, name)` ends a training graph. The child writes the model with **skops** into the run's output dir; after the run, `saved.register_saved` moves it to `volumes/trained_models/<id>.skops` and adds a `trained_models` row (name, estimator, size, sklearn/numpy/skops versions, source session and pipeline). Each save is a new immutable row.
+- **Loading.** `ml_load_model(model_id)` → `ml_predict`. The parent checks access and stages the file into the run's scratch dir; the child only ever reads the staged copy (`executor` `assets`; the remote worker receives them as extra multipart files).
+- **Safe format, not pickle.** `loads_model` refuses any type skops doesn't trust except four sklearn internals our estimators contain (`Tree`, `TreePredictor`, `KDTree`, `BallTree`, plus distance metrics), then checks the top-level class is one of the allow-listed estimators (D-042). A crafted file can't run code on load. `Birch` can't be saved (skops doesn't support it); the op says so.
+- **Painted labels.** "✎ Labels" on a session image opens a painter: classes with names and colours, brush, eraser, undo, multiple named label sets. Labels are stored as an 8-bit PNG (0 = unlabeled, 1..16 = class) at the image's full resolution (`annotations` table, `volumes/annotations/<id>.png`). `load_labels(annotation_id)` reads one; an empty id means the latest set painted on the image being processed, so one training pipeline works on any image you've painted. Sizes must match the image.
+- **Publishing.** A published graph may load models its author owns (or already-published ones, so forks keep working); publishing marks them `published`, which lets anyone running that pipeline load them, and deleting such a model only hides it from its owner (the file stays). Specific annotation ids can't be published: labels are private and tied to one image.
+- **APIs.** `GET/DELETE /api/models`, `GET/POST/DELETE /api/annotations`, `GET /api/annotations/<id>/image`. MCP: `list_models`, `list_labels` (read) and `save_labels` (run, PNG base64); run results include `saved_models`. The pipeline editor shows pickers for `model_id` / `annotation_id`; the pipelines page lists saved models.
+- **Guard.** skops loads native code through ctypes on import, which the sandbox guard blocks, so the child imports it before the guard is installed, only when the graph uses the save/load ops.
+
+**Why.** Train once (e.g. a random-forest pixel classifier from a few scribbles) and apply it to every image, or share it as a published pipeline. This is also the storage, safe format and versioning that model training on the GPU worker (phase 3) needs.
+
+## D-045 — Published pipelines as nodes
+
+**Decision.** A node can be a published pipeline pinned to one version: `{"id": "seg", "pipeline": {"published_id": ..., "version": 3}, "params": {"<inner node>.<param>": value}}`.
+
+- **Interface** (`subgraph.interface`, `GET /api/published/<id>/node?version=`):
+  - input `image` when the inner graph reads the source image;
+  - outputs are the inner graph's terminal outputs (the nodes nothing else reads), named by port, or `node.port` when two terminals share a port name;
+  - every inner param can be overridden as `node.param`; unset keeps the published value.
+- **Expansion in the parent** (`subgraph.expand`) before validation and before every run:
+  - inner nodes become `<node>/<inner>`;
+  - edges from the inner `input` are rewired to whatever feeds `image`;
+  - the version's frozen custom nodes come along under `<published_id>@<version>:<id>`, so they never collide with the viewer's library.
+
+  The sandbox only ever sees a plain graph. Nesting is allowed up to 4 deep, with at most 400 expanded nodes. Versions are immutable, so there can be no cycles.
+- **Reporting.** Validation issues and run failures inside the node are reported on it (`[inner] message`). Its values and preview come from the inner nodes producing its outputs. Inner outputs that nothing outside consumes stay final outputs.
+- **Unpublished pipelines.** A node whose pipeline was unpublished fails with "unpublished… fork it": the author's intent wins over downstream users.
+- **Where it shows up.** The editor palette has a "published pipelines" group, and the inspector shows the pinned version, owner and override params. The chat prompt and MCP instructions describe the node form.
+
+## D-046 — Batch runs
+
+**Decision.** `core/pipeline/batch.py`: one pipeline over up to 2000 images, in the background.
+
+- **Sources.**
+  - Pipeline: one of `pipeline_id`, `published_id` (+version) or a graph. The graph and the custom nodes it uses are frozen into the batch row at creation.
+  - Images: `image_ids` and/or every image of `session_ids`. `POST /api/batches/upload` takes loose files and `.zip` archives (entry count and size are capped, `__MACOSX` and dotfiles skipped, per-file size enforced on the bytes actually read). The page uploads in chunks under the request cap.
+- **Execution.**
+  - A shared thread pool (`PHOTON_BATCH_WORKERS`, default 2) runs one sandboxed pipeline per image through the same path as session runs: staged saved models and labels, pipeline-node expansion, saved-model registration.
+  - Batch runs set `export_tables`: the child also writes every table-like non-image value (dicts of equal-length columns, 1-D arrays) as CSV, so per-object results aren't lost to the 32-entry summaries.
+  - At most 3 active batches per user.
+- **Results.** Per image: status, error, seconds, values, output images (with 256-px previews) and tables. Downloads:
+  - `values.csv`: a row per image, a column per `node.port`;
+  - `table.csv?key=node.port`: every image's rows, tagged with index, filename and image_id;
+  - `download.zip`: all of the above plus output images.
+
+  Outputs live in `volumes/outputs/batches/<id>/`, not in a session, and are served only to the owner.
+- **Control.** Cancel stops after the running images. Retry re-runs failed and cancelled images. Delete removes results; the source images stay.
+- **Restarts.** Rows record the runner's pid. The first process to serve a request (Flask: on its first request, so a reloader's watcher process never claims work), or the MCP server at startup, atomically takes over batches whose process is gone and continues with the images not done.
+- **Interfaces.**
+  - Pages `/batches` and `/batches/<id>`, and a "Batch…" button in the editor.
+  - MCP: `upload_images` (a zip as base64 or URL, or server paths/folders), `run_batch`, `get_batch`, `get_batch_results` (values CSV or one table, paged as CSV text) and `cancel_batch`.
+  - `describe_op("pipeline:<published_id>[@v]")` gives a published pipeline's node interface and the exact node JSON.
+
+## D-047 — Uploaded segmentation models (weights + spec, no code)
+
+**Decision.** Users add their own segmentation networks (e.g. a SegFormer tissue/background model) from the **Models** page or over MCP (`register_seg_model`), and run them with one generic node, `segment_with_model(model_id)`. The node outputs `mask`, `probability` and `labels`.
+
+**Why not code upload.** Model ops run in the model sidecar, which has the GPU and **no sandbox**. Running uploaded Python there, or unpickling an uploaded checkpoint with plain `torch.load`, would be arbitrary code on the host. So only data is accepted:
+- **Spec.** An allow-listed `segmentation_models_pytorch` architecture (Segformer, Unet, Unet++, DeepLabV3/+, FPN, Linknet, PSPNet, MAnet, PAN, UPerNet) with an encoder name, built by Photon with `encoder_weights=None`, so nothing is downloaded. Plus in_channels, classes, sigmoid or softmax (with a foreground class), input size (multiples of 32), normalisation (ImageNet / 0–1 / custom mean and std), colour order, threshold, and post-processing from fixed options (closing radius, minimum component fraction, hole filling, smoothing).
+- **Weights.** A state_dict read with `safetensors` or `torch.load(weights_only=True)`, which rebuilds tensors and plain containers only. Common wrappers (`state_dict`, `model`, …) and `module.` prefixes are unwrapped. Up to `PHOTON_MAX_MODEL_MB` (500), and browser uploads also obey `MAX_UPLOAD_MB`.
+- **Check.** On upload, a separate CPU-only process builds the network, loads the weights strictly and runs one forward pass at the input size, checking the output shape. Status goes `checking` → `ready` or `failed` (with the reason). Uploads interrupted by a restart are checked again.
+
+**Running.** The sidecar resolves `user:<model_id>` from the database (`registry.get_model_spec`), so ModelManager's lazy load, idle unload and VRAM budget apply as for built-in models. Pre- and post-processing are fixed Photon code in `ops/models.py` that follows the spec.
+
+**Access: per-run grants.** The pipeline child runs untrusted custom-node code and can talk to the sidecar socket, so the sidecar can't trust a `model_id` from it.
+- Before a run, the parent checks the user may use each model (owner, or published) and writes a grant file to `volumes/model_grants/<token>`, a directory the sandboxed child can neither read nor write.
+- The child only carries the token. The sidecar refuses an uploaded model without a matching, unexpired grant.
+- Grants are revoked when the run ends.
+
+**Publishing and limits.**
+- Publishing a pipeline marks its uploaded models published, so others can run it. Deleting a published model hides it but keeps the weights.
+- Uploaded models run only with `PHOTON_SANDBOX=local`: the weights stay on this host.
+- Dependencies come in the optional extra `models` (`segmentation-models-pytorch>=0.4`, which added `Segformer`, and `timm`). Use `uv sync --extra mcp --extra models`.
+
+## D-048 — Disk housekeeping, per-user quota, closed sign-up by default
+
+**Problems.**
+- Every pipeline run left its scratch folder in `volumes/tmp_exec`, holding `run.py`, `result.json` and copies of staged models and labels. 168 had piled up.
+- Nothing bounded what one user can store.
+- Batch outputs were kept forever.
+- Sign-up defaulted to open.
+
+**Decisions.**
+- **Scratch.** The executor deletes a run's scratch folder when the run ends, on every exit path. `PHOTON_KEEP_SCRATCH=1` keeps them for debugging.
+- **Sweeps.** `core/housekeeping.py` runs hourly in the process that serves requests (started on Flask's first request) and in the MCP server. It removes:
+  - `tmp_exec` entries older than 6 h (crashes, worker job folders, zip downloads);
+  - `model_ipc` `.npy` files older than 1 h;
+  - expired model grants;
+  - finished batches older than `PHOTON_BATCH_RETENTION_DAYS` (0 = keep, the default). Results and rows are deleted; source images are kept.
+- **Quota.** `PHOTON_USER_QUOTA_GB` (0 = unlimited, the default) caps uploaded images plus session outputs plus batch outputs plus saved and uploaded models.
+  - Usage comes from the database (image and model sizes) plus the user's output folders. It's cached for 60 s and refreshed after a write.
+  - Checked before anything new is written: every image upload (in `ingest_image_bytes`, which covers the web, batch upload and MCP), every session or chat or MCP run, batch creation, and model upload. Over quota gives HTTP 507 with the numbers and what to delete.
+  - `GET /auth/me/usage` returns the breakdown; the user menu shows it, with a bar when a quota is set.
+- **Sign-up** defaults to `closed`. New accounts come from `python -m src.backend.cli user add`, or by setting `PHOTON_SIGNUP=open|invite` deliberately, preferably with an allow-list. Existing accounts are unaffected.
+
+## D-049 — One `models` table for every kind of model
+
+**Problem.** Saved scikit-learn models (D-044, `trained_models`) and uploaded segmentation networks (D-047, `seg_models`) were in two tables with mostly the same columns. That meant two lists (Pipelines page and Models page), two MCP list tools, two delete/publish paths and two quota queries.
+
+**Decision.** One `models` table:
+- **Columns:** `model_id`, `user_id`, **`kind`** (`sklearn` | `segmentation`), `name`, `file` (relative to `volumes/`), `size_bytes`, `sha256`, `status` (`ready` | `checking` | `failed`), `error`, `spec_json`, `info_json`, `created_at`, `published`, `deleted_at`.
+- **`spec_json` holds what differs:** for sklearn, the estimator, library versions, session and pipeline it came from, and a summary; for segmentation, the architecture and pre-/post-processing spec.
+- **Shared rules** live in `core/models/records.py`: who may use a model, delete (hidden; the file is kept while published), publish, file location and the public shape. `saved.py` (sklearn) and `user_models.py` (segmentation) use them.
+- **One API**, `/api/models[?kind=&status=]`: upload, get and delete live there, replacing `/api/seg-models` and the old sklearn-only `/api/models`. **One Models page** lists both kinds with a filter; the Pipelines page links to it instead of keeping its own list.
+- **MCP:** `list_models(kind)`, `get_model`, `register_model`, replacing `list_seg_models`, `get_seg_model` and `register_seg_model`.
+- **How they run is unchanged:** sklearn models still load in the sandboxed child (`ml_load_model`), segmentation models in the GPU sidecar with per-run grants (`segment_with_model`).
+
+**Migration.** `init_db` copies the rows of the old tables into `models`, keeping their IDs (pipelines refer to them) and leaving their files where they are (`file` = `trained_models/…` or `model_weights/…`). It then drops the old tables. New files go to `volumes/models/`.
